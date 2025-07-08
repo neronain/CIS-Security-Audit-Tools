@@ -1,0 +1,1282 @@
+# CIS Windows Server Active Directory Security Audit Script
+# Version: 1.0
+# Author: Security Audit Tool
+# Description: ตรวจสอบความปลอดภัยของ Windows Server และ Active Directory ตามมาตรฐาน CIS
+# Requires: PowerShell 5.1+, Run as Administrator, AD PowerShell Module
+
+param(
+    [switch]$Help,
+    [switch]$CreateHardening,
+    [switch]$ExportResults,
+    [switch]$DetailedAD,
+    [string]$OutputPath = "C:\Temp",
+    [string]$DomainName = ""
+)
+
+# Import required modules
+try {
+    Import-Module ActiveDirectory -ErrorAction Stop
+    Import-Module GroupPolicy -ErrorAction SilentlyContinue
+}
+catch {
+    Write-Host "ไม่สามารถ import Active Directory module ได้ กรุณาติดตั้ง RSAT-AD-PowerShell" -ForegroundColor Red
+    exit 1
+}
+
+# Global Variables
+$script:PassCount = 0
+$script:FailCount = 0
+$script:WarnCount = 0
+$script:TotalChecks = 0
+$script:LogFile = ""
+$script:Results = @()
+$script:IsDomainController = $false
+$script:DomainInfo = $null
+
+# Color definitions
+$Colors = @{
+    'PASS' = 'Green'
+    'FAIL' = 'Red'
+    'WARN' = 'Yellow'
+    'INFO' = 'Cyan'
+    'HEADER' = 'Magenta'
+    'CRITICAL' = 'DarkRed'
+}
+
+# Initialize script
+function Initialize-Script {
+    Clear-Host
+    
+    # Check PowerShell version
+    if ($PSVersionTable.PSVersion.Major -lt 5) {
+        Write-Host "ต้องการ PowerShell 5.1 หรือใหม่กว่า" -ForegroundColor Red
+        exit 1
+    }
+    
+    # Check if running as Administrator
+    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Host "กรุณารันสคริปต์นี้ในสิทธิ์ Administrator" -ForegroundColor Red
+        exit 1
+    }
+    
+    # Check if this is a Domain Controller
+    try {
+        $dcDiag = dcdiag /test:services /v 2>$null
+        if ($dcDiag -and $dcDiag -match "passed test Services") {
+            $script:IsDomainController = $true
+            Write-Host "ตรวจพบว่าเครื่องนี้เป็น Domain Controller" -ForegroundColor Green
+        }
+    }
+    catch {
+        $script:IsDomainController = $false
+    }
+    
+    # Get domain information
+    try {
+        if ($DomainName) {
+            $script:DomainInfo = Get-ADDomain -Identity $DomainName
+        } else {
+            $script:DomainInfo = Get-ADDomain
+        }
+    }
+    catch {
+        Write-Host "ไม่สามารถเชื่อมต่อกับ Active Directory ได้" -ForegroundColor Red
+        $script:DomainInfo = $null
+    }
+    
+    # Create output directory
+    if (-not (Test-Path $OutputPath)) {
+        New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
+    }
+    
+    # Set log file path
+    $script:LogFile = Join-Path $OutputPath "CIS_WindowsServer_AD_Audit_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+    
+    # Display header
+    Write-Host "╔════════════════════════════════════════════════════════════════╗" -ForegroundColor $Colors.HEADER
+    Write-Host "║         CIS Windows Server AD Security Audit Script           ║" -ForegroundColor $Colors.HEADER
+    Write-Host "║                        Version 1.0                            ║" -ForegroundColor $Colors.HEADER
+    Write-Host "╚════════════════════════════════════════════════════════════════╝" -ForegroundColor $Colors.HEADER
+    Write-Host ""
+}
+
+# Function to write results
+function Write-Result {
+    param(
+        [string]$Status,
+        [string]$CheckID,
+        [string]$Description,
+        [string]$Details = "",
+        [string]$Recommendation = "",
+        [string]$RiskLevel = "Medium"
+    )
+    
+    $script:TotalChecks++
+    
+    # Create result object
+    $resultObj = [PSCustomObject]@{
+        CheckID = $CheckID
+        Status = $Status
+        Description = $Description
+        Details = $Details
+        Recommendation = $Recommendation
+        RiskLevel = $RiskLevel
+        Timestamp = Get-Date
+    }
+    
+    $script:Results += $resultObj
+    
+    # Update counters
+    switch ($Status) {
+        'PASS' { $script:PassCount++ }
+        'FAIL' { $script:FailCount++ }
+        'WARN' { $script:WarnCount++ }
+    }
+    
+    # Display to console
+    $statusText = "[$Status]".PadRight(6)
+    $color = $Colors[$Status]
+    if ($RiskLevel -eq "Critical" -and $Status -eq "FAIL") {
+        $color = $Colors.CRITICAL
+    }
+    
+    Write-Host $statusText -ForegroundColor $color -NoNewline
+    Write-Host " $Description"
+    
+    if ($Details) {
+        Write-Host "       รายละเอียด: $Details" -ForegroundColor Gray
+    }
+    
+    if ($Recommendation) {
+        Write-Host "       คำแนะนำ: $Recommendation" -ForegroundColor Gray
+    }
+    
+    if ($RiskLevel -eq "Critical") {
+        Write-Host "       ⚠️  ระดับความเสี่ยง: สูงมาก" -ForegroundColor $Colors.CRITICAL
+    }
+    
+    # Log to file
+    $logEntry = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [$Status] [$RiskLevel] $CheckID - $Description"
+    if ($Details) { $logEntry += " | Details: $Details" }
+    if ($Recommendation) { $logEntry += " | Recommendation: $Recommendation" }
+    
+    Add-Content -Path $script:LogFile -Value $logEntry
+}
+
+# Get system and domain information
+function Get-SystemAndDomainInfo {
+    Write-Host "`n=== ข้อมูลระบบและโดเมน ===" -ForegroundColor $Colors.HEADER
+    
+    $os = Get-CimInstance -ClassName Win32_OperatingSystem
+    $computer = Get-CimInstance -ClassName Win32_ComputerSystem
+    
+    Write-Result "INFO" "SYS001" "OS Version: $($os.Caption) Build $($os.BuildNumber)"
+    Write-Result "INFO" "SYS002" "Server Name: $($computer.Name)"
+    Write-Result "INFO" "SYS003" "Domain: $($computer.Domain)"
+    Write-Result "INFO" "SYS004" "Is Domain Controller: $script:IsDomainController"
+    
+    if ($script:DomainInfo) {
+        Write-Result "INFO" "DOM001" "Domain Name: $($script:DomainInfo.DNSRoot)"
+        Write-Result "INFO" "DOM002" "Domain Functional Level: $($script:DomainInfo.DomainMode)"
+        Write-Result "INFO" "DOM003" "PDC Emulator: $($script:DomainInfo.PDCEmulator)"
+        
+        # Check functional level
+        $functionalLevel = [int]($script:DomainInfo.DomainMode -replace '\D','')
+        if ($functionalLevel -ge 2016) {
+            Write-Result "PASS" "DOM004" "Domain Functional Level เป็นเวอร์ชันที่รองรับ"
+        } else {
+            Write-Result "WARN" "DOM004" "Domain Functional Level เป็นเวอร์ชันเก่า" -Recommendation "ควรอัพเกรด functional level"
+        }
+    }
+    
+    Write-Result "INFO" "SYS005" "Log File: $script:LogFile"
+}
+
+# 1. Domain Controller Security
+function Test-DomainControllerSecurity {
+    if (-not $script:IsDomainController) {
+        Write-Host "`n=== 1. การตรวจสอบ Domain Controller - ข้าม (ไม่ใช่ DC) ===" -ForegroundColor $Colors.HEADER
+        return
+    }
+    
+    Write-Host "`n=== 1. การตรวจสอบ Domain Controller Security ===" -ForegroundColor $Colors.HEADER
+    
+    # Check FSMO roles
+    try {
+        $fsmoRoles = netdom query fsmo 2>$null
+        if ($fsmoRoles) {
+            Write-Result "PASS" "DC001" "FSMO Roles: สามารถสอบถามได้"
+            
+            # Check if all roles are on one DC (single point of failure)
+            $roleHolders = @()
+            foreach ($line in $fsmoRoles) {
+                if ($line -match "The (.+) for the (.+) is (.+)") {
+                    $roleHolders += $matches[3]
+                }
+            }
+            
+            $uniqueHolders = $roleHolders | Sort-Object -Unique
+            if ($uniqueHolders.Count -eq 1) {
+                Write-Result "WARN" "DC002" "FSMO Roles อยู่ที่ DC เดียว" -Recommendation "พิจารณากระจาย FSMO roles เพื่อลด single point of failure"
+            } else {
+                Write-Result "PASS" "DC002" "FSMO Roles กระจายอยู่หลาย DC"
+            }
+        }
+    }
+    catch {
+        Write-Result "WARN" "DC001" "ไม่สามารถตรวจสอบ FSMO Roles ได้" -Details $_.Exception.Message
+    }
+    
+    # Check Sysvol and Netlogon shares
+    $criticalShares = @("SYSVOL", "NETLOGON")
+    foreach ($share in $criticalShares) {
+        try {
+            $shareInfo = Get-SmbShare -Name $share -ErrorAction SilentlyContinue
+            if ($shareInfo) {
+                Write-Result "PASS" "DC00$($criticalShares.IndexOf($share) + 3)" "$share Share: พร้อมใช้งาน"
+                
+                # Check share permissions
+                $shareAccess = Get-SmbShareAccess -Name $share
+                $everyoneAccess = $shareAccess | Where-Object { $_.AccountName -eq "Everyone" }
+                if ($everyoneAccess -and $everyoneAccess.AccessRight -eq "Full") {
+                    Write-Result "WARN" "DC00$($criticalShares.IndexOf($share) + 5)" "$share Share: Everyone มีสิทธิ์ Full" -Recommendation "ควรจำกัดสิทธิ์การเข้าถึง"
+                } else {
+                    Write-Result "PASS" "DC00$($criticalShares.IndexOf($share) + 5)" "$share Share: สิทธิ์เหมาะสม"
+                }
+            } else {
+                Write-Result "FAIL" "DC00$($criticalShares.IndexOf($share) + 3)" "$share Share: ไม่พร้อมใช้งาน" -RiskLevel "Critical"
+            }
+        }
+        catch {
+            Write-Result "WARN" "DC00$($criticalShares.IndexOf($share) + 3)" "ไม่สามารถตรวจสอบ $share Share ได้"
+        }
+    }
+    
+    # Check AD Database and Log locations
+    try {
+        $ntdsutil = ntdsutil "files" "info" quit quit 2>$null
+        if ($ntdsutil -match "Database location") {
+            Write-Result "PASS" "DC007" "AD Database: สามารถตรวจสอบตำแหน่งได้"
+        }
+    }
+    catch {
+        Write-Result "WARN" "DC007" "ไม่สามารถตรวจสอบ AD Database location ได้"
+    }
+    
+    # Check DNS service (critical for AD)
+    $dnsService = Get-Service -Name "DNS" -ErrorAction SilentlyContinue
+    if ($dnsService -and $dnsService.Status -eq "Running") {
+        Write-Result "PASS" "DC008" "DNS Service: กำลังทำงาน"
+    } else {
+        Write-Result "FAIL" "DC008" "DNS Service: ไม่ทำงาน" -RiskLevel "Critical" -Recommendation "DNS service จำเป็นสำหรับ Active Directory"
+    }
+}
+
+# 2. Active Directory Users and Groups Security
+function Test-ADUsersAndGroups {
+    if (-not $script:DomainInfo) {
+        Write-Host "`n=== 2. การตรวจสอบ AD Users and Groups - ข้าม (ไม่มีการเชื่อมต่อ AD) ===" -ForegroundColor $Colors.HEADER
+        return
+    }
+    
+    Write-Host "`n=== 2. การตรวจสอบ Active Directory Users และ Groups ===" -ForegroundColor $Colors.HEADER
+    
+    try {
+        # Check default Administrator account
+        $adminAccount = Get-ADUser -Filter "SID -like '*-500'" -Properties AccountNotDelegated, PasswordNeverExpires, Enabled
+        if ($adminAccount) {
+            if ($adminAccount.Name -ne "Administrator") {
+                Write-Result "PASS" "ADU001" "Default Administrator: ถูกเปลี่ยนชื่อเป็น '$($adminAccount.Name)'"
+            } else {
+                Write-Result "WARN" "ADU001" "Default Administrator: ยังใช้ชื่อ 'Administrator'" -Recommendation "ควรเปลี่ยนชื่อ default administrator"
+            }
+            
+            if (-not $adminAccount.Enabled) {
+                Write-Result "PASS" "ADU002" "Default Administrator: ปิดใช้งาน"
+            } else {
+                Write-Result "WARN" "ADU002" "Default Administrator: เปิดใช้งาน" -Recommendation "ควรปิดใช้งาน default administrator หากไม่จำเป็น"
+            }
+            
+            if ($adminAccount.AccountNotDelegated) {
+                Write-Result "PASS" "ADU003" "Administrator Account: ตั้งค่า 'Account is sensitive and cannot be delegated'"
+            } else {
+                Write-Result "WARN" "ADU003" "Administrator Account: ไม่ได้ตั้งค่า 'Account is sensitive'" -Recommendation "ควรตั้งค่า sensitive flag"
+            }
+        }
+        
+        # Check Guest account
+        $guestAccount = Get-ADUser -Filter "SID -like '*-501'" -Properties Enabled
+        if ($guestAccount -and -not $guestAccount.Enabled) {
+            Write-Result "PASS" "ADU004" "Guest Account: ปิดใช้งาน"
+        } elseif ($guestAccount -and $guestAccount.Enabled) {
+            Write-Result "FAIL" "ADU004" "Guest Account: เปิดใช้งาน" -RiskLevel "High" -Recommendation "ควรปิดใช้งาน Guest account"
+        }
+        
+        # Check privileged groups membership
+        $privilegedGroups = @(
+            "Domain Admins",
+            "Enterprise Admins", 
+            "Schema Admins",
+            "Administrators"
+        )
+        
+        foreach ($group in $privilegedGroups) {
+            try {
+                $groupMembers = Get-ADGroupMember -Identity $group -ErrorAction SilentlyContinue
+                $memberCount = ($groupMembers | Measure-Object).Count
+                
+                if ($memberCount -le 3) {
+                    Write-Result "PASS" "ADU00$($privilegedGroups.IndexOf($group) + 5)" "$group: มีสมาชิก $memberCount คน"
+                } elseif ($memberCount -le 5) {
+                    Write-Result "WARN" "ADU00$($privilegedGroups.IndexOf($group) + 5)" "$group: มีสมาชิก $memberCount คน" -Recommendation "ตรวจสอบความจำเป็นของสมาชิกแต่ละคน"
+                } else {
+                    Write-Result "FAIL" "ADU00$($privilegedGroups.IndexOf($group) + 5)" "$group: มีสมาชิกมากเกินไป ($memberCount คน)" -RiskLevel "High" -Recommendation "ลดจำนวนสมาชิกในกลุ่มที่มีสิทธิ์สูง"
+                }
+            }
+            catch {
+                Write-Result "WARN" "ADU00$($privilegedGroups.IndexOf($group) + 5)" "ไม่สามารถตรวจสอบ $group ได้"
+            }
+        }
+        
+        # Check for users with passwords never expire
+        $neverExpireUsers = Get-ADUser -Filter "PasswordNeverExpires -eq `$true -and Enabled -eq `$true" -Properties PasswordNeverExpires
+        if ($neverExpireUsers) {
+            $userCount = ($neverExpireUsers | Measure-Object).Count
+            Write-Result "WARN" "ADU009" "Users with PasswordNeverExpires: $userCount คน" -Details ($neverExpireUsers.Name -join ", ") -Recommendation "ควรตั้งค่าให้ password มีวันหมดอายุ"
+        } else {
+            Write-Result "PASS" "ADU009" "Users with PasswordNeverExpires: ไม่พบ"
+        }
+        
+        # Check for disabled accounts in privileged groups
+        foreach ($group in $privilegedGroups) {
+            try {
+                $groupMembers = Get-ADGroupMember -Identity $group | Get-ADUser -Properties Enabled
+                $disabledMembers = $groupMembers | Where-Object { -not $_.Enabled }
+                
+                if ($disabledMembers) {
+                    Write-Result "WARN" "ADU01$($privilegedGroups.IndexOf($group))" "$group: มี disabled accounts" -Details ($disabledMembers.Name -join ", ") -Recommendation "ลบ disabled accounts ออกจากกลุ่ม privileged"
+                } else {
+                    Write-Result "PASS" "ADU01$($privilegedGroups.IndexOf($group))" "$group: ไม่มี disabled accounts"
+                }
+            }
+            catch {
+                Write-Result "WARN" "ADU01$($privilegedGroups.IndexOf($group))" "ไม่สามารถตรวจสอบ disabled accounts ใน $group ได้"
+            }
+        }
+    }
+    catch {
+        Write-Result "WARN" "ADU999" "ไม่สามารถตรวจสอบ AD Users และ Groups ได้" -Details $_.Exception.Message
+    }
+}
+
+# 3. Password and Account Policies
+function Test-PasswordPolicies {
+    if (-not $script:DomainInfo) {
+        Write-Host "`n=== 3. การตรวจสอบ Password Policies - ข้าม (ไม่มีการเชื่อมต่อ AD) ===" -ForegroundColor $Colors.HEADER
+        return
+    }
+    
+    Write-Host "`n=== 3. การตรวจสอบ Password และ Account Policies ===" -ForegroundColor $Colors.HEADER
+    
+    try {
+        # Get default domain password policy
+        $passwordPolicy = Get-ADDefaultDomainPasswordPolicy
+        
+        if ($passwordPolicy) {
+            # Minimum password length
+            if ($passwordPolicy.MinPasswordLength -ge 14) {
+                Write-Result "PASS" "PWD001" "Minimum Password Length: $($passwordPolicy.MinPasswordLength)"
+            } elseif ($passwordPolicy.MinPasswordLength -ge 8) {
+                Write-Result "WARN" "PWD001" "Minimum Password Length: $($passwordPolicy.MinPasswordLength)" -Recommendation "แนะนำให้ตั้งค่าอย่างน้อย 14 ตัวอักษร"
+            } else {
+                Write-Result "FAIL" "PWD001" "Minimum Password Length: $($passwordPolicy.MinPasswordLength)" -RiskLevel "High" -Recommendation "ต้องตั้งค่าอย่างน้อย 8 ตัวอักษร"
+            }
+            
+            # Password complexity
+            if ($passwordPolicy.ComplexityEnabled) {
+                Write-Result "PASS" "PWD002" "Password Complexity: เปิดใช้งาน"
+            } else {
+                Write-Result "FAIL" "PWD002" "Password Complexity: ปิดใช้งาน" -RiskLevel "High" -Recommendation "ควรเปิดใช้งาน password complexity"
+            }
+            
+            # Password history
+            if ($passwordPolicy.PasswordHistoryCount -ge 12) {
+                Write-Result "PASS" "PWD003" "Password History: $($passwordPolicy.PasswordHistoryCount)"
+            } else {
+                Write-Result "WARN" "PWD003" "Password History: $($passwordPolicy.PasswordHistoryCount)" -Recommendation "แนะนำให้ตั้งค่าอย่างน้อย 12"
+            }
+            
+            # Maximum password age
+            if ($passwordPolicy.MaxPasswordAge.Days -le 90 -and $passwordPolicy.MaxPasswordAge.Days -gt 0) {
+                Write-Result "PASS" "PWD004" "Maximum Password Age: $($passwordPolicy.MaxPasswordAge.Days) วัน"
+            } else {
+                Write-Result "WARN" "PWD004" "Maximum Password Age: $($passwordPolicy.MaxPasswordAge.Days) วัน" -Recommendation "แนะนำให้ตั้งค่าระหว่าง 30-90 วัน"
+            }
+            
+            # Minimum password age
+            if ($passwordPolicy.MinPasswordAge.Days -ge 1) {
+                Write-Result "PASS" "PWD005" "Minimum Password Age: $($passwordPolicy.MinPasswordAge.Days) วัน"
+            } else {
+                Write-Result "WARN" "PWD005" "Minimum Password Age: $($passwordPolicy.MinPasswordAge.Days) วัน" -Recommendation "แนะนำให้ตั้งค่าอย่างน้อย 1 วัน"
+            }
+            
+            # Account lockout threshold
+            if ($passwordPolicy.LockoutThreshold -gt 0 -and $passwordPolicy.LockoutThreshold -le 5) {
+                Write-Result "PASS" "PWD006" "Account Lockout Threshold: $($passwordPolicy.LockoutThreshold)"
+            } elseif ($passwordPolicy.LockoutThreshold -eq 0) {
+                Write-Result "WARN" "PWD006" "Account Lockout Threshold: ไม่มีการล็อก" -Recommendation "ควรตั้งค่า lockout threshold"
+            } else {
+                Write-Result "WARN" "PWD006" "Account Lockout Threshold: $($passwordPolicy.LockoutThreshold)" -Recommendation "แนะนำให้ตั้งค่าระหว่าง 3-5"
+            }
+            
+            # Account lockout duration
+            if ($passwordPolicy.LockoutDuration.Minutes -ge 15) {
+                Write-Result "PASS" "PWD007" "Account Lockout Duration: $($passwordPolicy.LockoutDuration.Minutes) นาที"
+            } else {
+                Write-Result "WARN" "PWD007" "Account Lockout Duration: $($passwordPolicy.LockoutDuration.Minutes) นาที" -Recommendation "แนะนำให้ตั้งค่าอย่างน้อย 15 นาที"
+            }
+        }
+        
+        # Check for Fine-Grained Password Policies
+        try {
+            $fineGrainedPolicies = Get-ADFineGrainedPasswordPolicy -Filter "*"
+            if ($fineGrainedPolicies) {
+                Write-Result "PASS" "PWD008" "Fine-Grained Password Policies: มีการใช้งาน"
+                
+                foreach ($policy in $fineGrainedPolicies) {
+                    if ($policy.MinPasswordLength -ge 12) {
+                        Write-Result "PASS" "PWD009" "FGPP '$($policy.Name)' - Min Length: $($policy.MinPasswordLength)"
+                    } else {
+                        Write-Result "WARN" "PWD009" "FGPP '$($policy.Name)' - Min Length: $($policy.MinPasswordLength)" -Recommendation "แนะนำให้ตั้งค่าอย่างน้อย 12 ตัวอักษร"
+                    }
+                }
+            } else {
+                Write-Result "INFO" "PWD008" "Fine-Grained Password Policies: ไม่มีการใช้งาน"
+            }
+        }
+        catch {
+            Write-Result "WARN" "PWD008" "ไม่สามารถตรวจสอบ Fine-Grained Password Policies ได้"
+        }
+    }
+    catch {
+        Write-Result "WARN" "PWD999" "ไม่สามารถตรวจสอบ Password Policies ได้" -Details $_.Exception.Message
+    }
+}
+
+# 4. Group Policy Security
+function Test-GroupPolicySecurity {
+    Write-Host "`n=== 4. การตรวจสอบ Group Policy Security ===" -ForegroundColor $Colors.HEADER
+    
+    try {
+        # Check if Group Policy module is available
+        if (-not (Get-Module -Name GroupPolicy -ListAvailable)) {
+            Write-Result "WARN" "GPO001" "Group Policy PowerShell Module: ไม่พร้อมใช้งาน" -Recommendation "ติดตั้ง RSAT-GroupPolicy"
+            return
+        }
+        
+        # Get all GPOs
+        $allGPOs = Get-GPO -All
+        $gpoCount = ($allGPOs | Measure-Object).Count
+        Write-Result "INFO" "GPO001" "จำนวน Group Policy Objects: $gpoCount"
+        
+        # Check for unlinked GPOs
+        $unlinkedGPOs = @()
+        foreach ($gpo in $allGPOs) {
+            $links = Get-GPOReport -Guid $gpo.Id -ReportType XML | Select-String -Pattern "<LinksTo>"
+            if (-not $links) {
+                $unlinkedGPOs += $gpo.DisplayName
+            }
+        }
+        
+        if ($unlinkedGPOs.Count -eq 0) {
+            Write-Result "PASS" "GPO002" "Unlinked GPOs: ไม่พบ"
+        } else {
+            Write-Result "WARN" "GPO002" "Unlinked GPOs: $($unlinkedGPOs.Count) GPOs" -Details ($unlinkedGPOs -join ", ") -Recommendation "ลบ GPOs ที่ไม่ได้ใช้งาน"
+        }
+        
+        # Check Default Domain Policy
+        try {
+            $defaultDomainPolicy = Get-GPO -Name "Default Domain Policy"
+            if ($defaultDomainPolicy) {
+                Write-Result "PASS" "GPO003" "Default Domain Policy: พร้อมใช้งาน"
+                
+                # Check if default policy has been modified significantly
+                $policyReport = Get-GPOReport -Name "Default Domain Policy" -ReportType XML
+                if ($policyReport -match "<VersionDirectory>1</VersionDirectory>" -and $policyReport -match "<VersionSysvol>1</VersionSysvol>") {
+                    Write-Result "WARN" "GPO004" "Default Domain Policy: ยังไม่ได้ถูกแก้ไข" -Recommendation "ควรกำหนดค่า security settings ใน Default Domain Policy"
+                } else {
+                    Write-Result "PASS" "GPO004" "Default Domain Policy: มีการกำหนดค่า"
+                }
+            }
+        }
+        catch {
+            Write-Result "WARN" "GPO003" "ไม่สามารถตรวจสอบ Default Domain Policy ได้"
+        }
+        
+        # Check Default Domain Controllers Policy
+        try {
+            $defaultDCPolicy = Get-GPO -Name "Default Domain Controllers Policy"
+            if ($defaultDCPolicy) {
+                Write-Result "PASS" "GPO005" "Default Domain Controllers Policy: พร้อมใช้งาน"
+            }
+        }
+        catch {
+            Write-Result "WARN" "GPO005" "ไม่สามารถตรวจสอบ Default Domain Controllers Policy ได้"
+        }
+        
+        # Check GPO permissions
+        $adminGroups = @("Domain Admins", "Enterprise Admins", "Group Policy Creator Owners")
+        foreach ($gpo in ($allGPOs | Select-Object -First 5)) {  # Check first 5 GPOs as sample
+            try {
+                $gpoPermissions = Get-GPPermission -Guid $gpo.Id -All
+                $hasAdminControl = $false
+                
+                foreach ($permission in $gpoPermissions) {
+                    if ($permission.Trustee.Name -in $adminGroups -and $permission.Permission -match "Edit|FullControl") {
+                        $hasAdminControl = $true
+                        break
+                    }
+                }
+                
+                if ($hasAdminControl) {
+                    Write-Result "PASS" "GPO006" "GPO '$($gpo.DisplayName)': มีการควบคุมสิทธิ์ที่เหมาะสม"
+                } else {
+                    Write-Result "WARN" "GPO006" "GPO '$($gpo.DisplayName)': ควรตรวจสอบสิทธิ์การเข้าถึง"
+                }
+            }
+            catch {
+                Write-Result "WARN" "GPO006" "ไม่สามารถตรวจสอบสิทธิ์ GPO '$($gpo.DisplayName)' ได้"
+            }
+        }
+    }
+    catch {
+        Write-Result "WARN" "GPO999" "ไม่สามารถตรวจสอบ Group Policy ได้" -Details $_.Exception.Message
+    }
+}
+
+# 5. DNS Security
+function Test-DNSSecurity {
+    Write-Host "`n=== 5. การตรวจสอบ DNS Security ===" -ForegroundColor $Colors.HEADER
+    
+    try {
+        # Check if DNS Server feature is installed
+        $dnsFeature = Get-WindowsFeature -Name DNS -ErrorAction SilentlyContinue
+        if (-not $dnsFeature -or $dnsFeature.InstallState -ne "Installed") {
+            Write-Result "INFO" "DNS001" "DNS Server: ไม่ได้ติดตั้ง (ข้ามการตรวจสอบ DNS)"
+            return
+        }
+        
+        # Check DNS service
+        $dnsService = Get-Service -Name "DNS" -ErrorAction SilentlyContinue
+        if ($dnsService -and $dnsService.Status -eq "Running") {
+            Write-Result "PASS" "DNS001" "DNS Service: กำลังทำงาน"
+        } else {
+            Write-Result "FAIL" "DNS001" "DNS Service: ไม่ทำงาน" -RiskLevel "Critical" -Recommendation "DNS service จำเป็นสำหรับ Active Directory"
+        }
+        
+        # Check DNS forwarders
+        try {
+            $dnsForwarders = Get-DnsServerForwarder -ErrorAction SilentlyContinue
+            if ($dnsForwarders -and $dnsForwarders.IPAddress) {
+                Write-Result "PASS" "DNS002" "DNS Forwarders: กำหนดค่าแล้ว"
+                
+                # Check for secure forwarders (avoid public DNS that might log queries)
+                $publicDNS = @("8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1")
+                $hasPublicDNS = $false
+                foreach ($forwarder in $dnsForwarders.IPAddress) {
+                    if ($forwarder.ToString() -in $publicDNS) {
+                        $hasPublicDNS = $true
+                        break
+                    }
+                }
+                
+                if ($hasPublicDNS) {
+                    Write-Result "WARN" "DNS003" "DNS Forwarders: ใช้ Public DNS" -Recommendation "พิจารณาใช้ DNS ขององค์กรแทน Public DNS"
+                } else {
+                    Write-Result "PASS" "DNS003" "DNS Forwarders: ไม่ใช้ Public DNS"
+                }
+            } else {
+                Write-Result "WARN" "DNS002" "DNS Forwarders: ไม่ได้กำหนดค่า" -Recommendation "ควรกำหนดค่า DNS forwarders"
+            }
+        }
+        catch {
+            Write-Result "WARN" "DNS002" "ไม่สามารถตรวจสอบ DNS Forwarders ได้"
+        }
+        
+        # Check DNS scavenging
+        try {
+            $dnsServer = Get-DnsServer -ErrorAction SilentlyContinue
+            if ($dnsServer -and $dnsServer.ServerSetting.ScavengingInterval.TotalHours -gt 0) {
+                Write-Result "PASS" "DNS004" "DNS Scavenging: เปิดใช้งาน"
+            } else {
+                Write-Result "WARN" "DNS004" "DNS Scavenging: ปิดใช้งาน" -Recommendation "ควรเปิดใช้งาน DNS scavenging เพื่อลบ stale records"
+            }
+        }
+        catch {
+            Write-Result "WARN" "DNS004" "ไม่สามารถตรวจสอบ DNS Scavenging ได้"
+        }
+        
+        # Check for DNS zone transfer restrictions
+        try {
+            if ($script:DomainInfo) {
+                $dnsZone = Get-DnsServerZone -Name $script:DomainInfo.DNSRoot -ErrorAction SilentlyContinue
+                if ($dnsZone) {
+                    if ($dnsZone.SecureSecondaries -eq "TransferToZoneNameServer") {
+                        Write-Result "PASS" "DNS005" "Zone Transfer: จำกัดเฉพาะ name servers"
+                    } elseif ($dnsZone.SecureSecondaries -eq "TransferToSecureServers") {
+                        Write-Result "PASS" "DNS005" "Zone Transfer: จำกัดเฉพาะ secure servers"
+                    } else {
+                        Write-Result "WARN" "DNS005" "Zone Transfer: อาจไม่มีการจำกัด" -Recommendation "ควรจำกัด zone transfer เฉพาะ authorized servers"
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Result "WARN" "DNS005" "ไม่สามารถตรวจสอบ DNS Zone Transfer ได้"
+        }
+    }
+    catch {
+        Write-Result "WARN" "DNS999" "ไม่สามารถตรวจสอบ DNS Security ได้" -Details $_.Exception.Message
+    }
+}
+
+# 6. Network Services Security
+function Test-NetworkServicesSecurity {
+    Write-Host "`n=== 6. การตรวจสอบ Network Services Security ===" -ForegroundColor $Colors.HEADER
+    
+    # Check SMB settings
+    try {
+        $smbConfig = Get-SmbServerConfiguration
+        
+        # SMB1 Protocol
+        if (-not $smbConfig.EnableSMB1Protocol) {
+            Write-Result "PASS" "NET001" "SMB1 Protocol: ปิดใช้งาน"
+        } else {
+            Write-Result "FAIL" "NET001" "SMB1 Protocol: เปิดใช้งาน" -RiskLevel "High" -Recommendation "ควรปิดใช้งาน SMB1 เนื่องจากไม่ปลอดภัย"
+        }
+        
+        # SMB Signing
+        if ($smbConfig.RequireSecuritySignature) {
+            Write-Result "PASS" "NET002" "SMB Signing: บังคับใช้งาน"
+        } else {
+            Write-Result "WARN" "NET002" "SMB Signing: ไม่บังคับใช้งาน" -Recommendation "ควรบังคับใช้งาน SMB signing"
+        }
+        
+        # SMB Encryption
+        if ($smbConfig.EncryptData) {
+            Write-Result "PASS" "NET003" "SMB Encryption: เปิดใช้งาน"
+        } else {
+            Write-Result "WARN" "NET003" "SMB Encryption: ปิดใช้งาน" -Recommendation "ควรเปิดใช้งาน SMB encryption"
+        }
+    }
+    catch {
+        Write-Result "WARN" "NET001" "ไม่สามารถตรวจสอบ SMB Configuration ได้"
+    }
+    
+    # Check Kerberos settings
+    try {
+        $kerberosPolicy = Get-ADDefaultDomainPasswordPolicy
+        if ($kerberosPolicy) {
+            # Kerberos ticket lifetime should be reasonable
+            Write-Result "INFO" "NET004" "Kerberos Max Ticket Age: $($kerberosPolicy.MaxPasswordAge.Days) วัน"
+        }
+        
+        # Check for DES encryption (should be disabled)
+        $desEnabled = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Kerberos\Parameters" -Name "AllowDES" -ErrorAction SilentlyContinue
+        if ($desEnabled -and $desEnabled.AllowDES -eq 0) {
+            Write-Result "PASS" "NET005" "Kerberos DES Encryption: ปิดใช้งาน"
+        } elseif ($desEnabled -and $desEnabled.AllowDES -eq 1) {
+            Write-Result "FAIL" "NET005" "Kerberos DES Encryption: เปิดใช้งาน" -RiskLevel "High" -Recommendation "ควรปิดใช้งาน DES encryption"
+        } else {
+            Write-Result "PASS" "NET005" "Kerberos DES Encryption: ปิดใช้งาน (default)"
+        }
+    }
+    catch {
+        Write-Result "WARN" "NET004" "ไม่สามารถตรวจสอบ Kerberos Settings ได้"
+    }
+    
+    # Check LDAP settings
+    try {
+        # LDAP Signing
+        $ldapSigning = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters" -Name "LDAPServerIntegrity" -ErrorAction SilentlyContinue
+        if ($ldapSigning -and $ldapSigning.LDAPServerIntegrity -eq 2) {
+            Write-Result "PASS" "NET006" "LDAP Signing: บังคับใช้งาน"
+        } elseif ($ldapSigning -and $ldapSigning.LDAPServerIntegrity -eq 1) {
+            Write-Result "WARN" "NET006" "LDAP Signing: ไม่บังคับ" -Recommendation "ควรบังคับใช้งาน LDAP signing"
+        } else {
+            Write-Result "WARN" "NET006" "LDAP Signing: ไม่ได้กำหนดค่า" -Recommendation "ควรกำหนดค่า LDAP signing"
+        }
+        
+        # LDAPS (LDAP over SSL)
+        $ldapsPort = Test-NetConnection -ComputerName "localhost" -Port 636 -WarningAction SilentlyContinue
+        if ($ldapsPort.TcpTestSucceeded) {
+            Write-Result "PASS" "NET007" "LDAPS (Port 636): พร้อมใช้งาน"
+        } else {
+            Write-Result "WARN" "NET007" "LDAPS (Port 636): ไม่พร้อมใช้งาน" -Recommendation "ควรเปิดใช้งาน LDAPS"
+        }
+    }
+    catch {
+        Write-Result "WARN" "NET006" "ไม่สามารถตรวจสอบ LDAP Settings ได้"
+    }
+}
+
+# 7. Windows Server Security Features
+function Test-WindowsServerSecurity {
+    Write-Host "`n=== 7. การตรวจสอบ Windows Server Security Features ===" -ForegroundColor $Colors.HEADER
+    
+    # Include basic server security checks from the Windows client script
+    # But adapted for server environment
+    
+    # Windows Firewall
+    try {
+        $firewallProfiles = @('Domain', 'Private', 'Public')
+        
+        foreach ($profile in $firewallProfiles) {
+            $fw = Get-NetFirewallProfile -Name $profile
+            
+            if ($fw.Enabled -eq $true) {
+                Write-Result "PASS" "SRV00$($firewallProfiles.IndexOf($profile) + 1)" "Windows Firewall ($profile): เปิดใช้งาน"
+            } else {
+                Write-Result "FAIL" "SRV00$($firewallProfiles.IndexOf($profile) + 1)" "Windows Firewall ($profile): ปิดใช้งาน" -RiskLevel "High" -Recommendation "ควรเปิดใช้งาน Firewall"
+            }
+        }
+    }
+    catch {
+        Write-Result "WARN" "SRV001" "ไม่สามารถตรวจสอบ Windows Firewall ได้"
+    }
+    
+    # Windows Defender (if available on server)
+    try {
+        $defenderStatus = Get-MpComputerStatus -ErrorAction SilentlyContinue
+        if ($defenderStatus) {
+            if ($defenderStatus.AntivirusEnabled) {
+                Write-Result "PASS" "SRV004" "Windows Defender Antivirus: เปิดใช้งาน"
+            } else {
+                Write-Result "WARN" "SRV004" "Windows Defender Antivirus: ปิดใช้งาน" -Recommendation "ควรมี antivirus solution"
+            }
+            
+            if ($defenderStatus.RealTimeProtectionEnabled) {
+                Write-Result "PASS" "SRV005" "Real-time Protection: เปิดใช้งาน"
+            } else {
+                Write-Result "WARN" "SRV005" "Real-time Protection: ปิดใช้งาน"
+            }
+        } else {
+            Write-Result "INFO" "SRV004" "Windows Defender: ไม่พร้อมใช้งานบน Server Core หรือมี antivirus อื่น"
+        }
+    }
+    catch {
+        Write-Result "INFO" "SRV004" "ไม่สามารถตรวจสอบ Windows Defender ได้"
+    }
+    
+    # Windows Updates
+    try {
+        $wuService = Get-Service -Name "wuauserv" -ErrorAction SilentlyContinue
+        if ($wuService -and $wuService.Status -eq "Running") {
+            Write-Result "PASS" "SRV006" "Windows Update Service: กำลังทำงาน"
+        } else {
+            Write-Result "WARN" "SRV006" "Windows Update Service: ไม่ทำงาน" -Recommendation "ควรเปิดใช้งาน Windows Update"
+        }
+        
+        # Check for recent updates
+        $recentUpdates = Get-HotFix | Where-Object { $_.InstalledOn -gt (Get-Date).AddDays(-30) }
+        if ($recentUpdates) {
+            Write-Result "PASS" "SRV007" "Recent Updates: พบ updates ใน 30 วันที่ผ่านมา"
+        } else {
+            Write-Result "WARN" "SRV007" "Recent Updates: ไม่พบ updates ใน 30 วันที่ผ่านมา" -Recommendation "ควรตรวจสอบและติดตั้ง updates"
+        }
+    }
+    catch {
+        Write-Result "WARN" "SRV006" "ไม่สามารถตรวจสอบ Windows Updates ได้"
+    }
+    
+    # Event Log configuration
+    try {
+        $securityLog = Get-WinEvent -ListLog Security -ErrorAction SilentlyContinue
+        if ($securityLog -and $securityLog.IsEnabled) {
+            Write-Result "PASS" "SRV008" "Security Event Log: เปิดใช้งาน"
+            
+            # Check log size
+            $logSizeMB = [math]::Round($securityLog.MaximumSizeInBytes / 1MB, 2)
+            if ($logSizeMB -ge 100) {
+                Write-Result "PASS" "SRV009" "Security Log Size: $logSizeMB MB"
+            } else {
+                Write-Result "WARN" "SRV009" "Security Log Size: $logSizeMB MB" -Recommendation "แนะนำให้ตั้งค่าอย่างน้อย 100 MB"
+            }
+        } else {
+            Write-Result "FAIL" "SRV008" "Security Event Log: ปิดใช้งาน" -RiskLevel "High" -Recommendation "ต้องเปิดใช้งาน Security Event Log"
+        }
+    }
+    catch {
+        Write-Result "WARN" "SRV008" "ไม่สามารถตรวจสอบ Event Log ได้"
+    }
+}
+
+# 8. Certificate Services Security (if installed)
+function Test-CertificateServicesSecurity {
+    Write-Host "`n=== 8. การตรวจสอบ Certificate Services Security ===" -ForegroundColor $Colors.HEADER
+    
+    try {
+        # Check if ADCS is installed
+        $adcsFeature = Get-WindowsFeature -Name "ADCS-Cert-Authority" -ErrorAction SilentlyContinue
+        if (-not $adcsFeature -or $adcsFeature.InstallState -ne "Installed") {
+            Write-Result "INFO" "CERT001" "Active Directory Certificate Services: ไม่ได้ติดตั้ง"
+            return
+        }
+        
+        Write-Result "INFO" "CERT001" "Active Directory Certificate Services: ติดตั้งแล้ว"
+        
+        # Check Certificate Authority service
+        $caService = Get-Service -Name "CertSvc" -ErrorAction SilentlyContinue
+        if ($caService -and $caService.Status -eq "Running") {
+            Write-Result "PASS" "CERT002" "Certificate Authority Service: กำลังทำงาน"
+        } else {
+            Write-Result "FAIL" "CERT002" "Certificate Authority Service: ไม่ทำงาน" -RiskLevel "High"
+        }
+        
+        # Check certificate templates (requires ADCS PowerShell module)
+        try {
+            # This is a basic check - in practice, you'd want to examine specific templates
+            $caConfig = certutil -config - -ping 2>$null
+            if ($caConfig -match "Ping successful") {
+                Write-Result "PASS" "CERT003" "CA Configuration: สามารถเชื่อมต่อได้"
+            } else {
+                Write-Result "WARN" "CERT003" "CA Configuration: ไม่สามารถตรวจสอบได้"
+            }
+        }
+        catch {
+            Write-Result "WARN" "CERT003" "ไม่สามารถตรวจสอบ CA Configuration ได้"
+        }
+        
+        # Check CRL distribution
+        try {
+            $crlCheck = certutil -crl 2>$null
+            if ($crlCheck -match "CRL is valid") {
+                Write-Result "PASS" "CERT004" "Certificate Revocation List: ถูกต้อง"
+            } else {
+                Write-Result "WARN" "CERT004" "Certificate Revocation List: อาจมีปัญหา"
+            }
+        }
+        catch {
+            Write-Result "WARN" "CERT004" "ไม่สามารถตรวจสอบ CRL ได้"
+        }
+    }
+    catch {
+        Write-Result "WARN" "CERT999" "ไม่สามารถตรวจสอบ Certificate Services ได้" -Details $_.Exception.Message
+    }
+}
+
+# 9. Additional AD Security Checks
+function Test-AdditionalADSecurity {
+    if (-not $script:DomainInfo) {
+        Write-Host "`n=== 9. การตรวจสอบความปลอดภัย AD เพิ่มเติม - ข้าม ===" -ForegroundColor $Colors.HEADER
+        return
+    }
+    
+    Write-Host "`n=== 9. การตรวจสอบความปลอดภัย Active Directory เพิ่มเติม ===" -ForegroundColor $Colors.HEADER
+    
+    try {
+        # Check for computers with old passwords
+        $staleComputers = Get-ADComputer -Filter "PasswordLastSet -lt '$((Get-Date).AddDays(-30))'" -Properties PasswordLastSet
+        if ($staleComputers) {
+            $staleCount = ($staleComputers | Measure-Object).Count
+            Write-Result "WARN" "ADS001" "Computers with old passwords: $staleCount เครื่อง" -Recommendation "ตรวจสอบและลบ computer accounts ที่ไม่ใช้งาน"
+        } else {
+            Write-Result "PASS" "ADS001" "Computers with old passwords: ไม่พบ"
+        }
+        
+        # Check for unused service accounts
+        $serviceAccounts = Get-ADUser -Filter "ServicePrincipalName -like '*'" -Properties ServicePrincipalName, LastLogonDate
+        $unusedSPNs = $serviceAccounts | Where-Object { $_.LastLogonDate -lt (Get-Date).AddDays(-90) -or $_.LastLogonDate -eq $null }
+        
+        if ($unusedSPNs) {
+            $unusedCount = ($unusedSPNs | Measure-Object).Count
+            Write-Result "WARN" "ADS002" "Service accounts ที่ไม่ได้ใช้งาน: $unusedCount accounts" -Recommendation "ตรวจสอบและปิดใช้งาน service accounts ที่ไม่จำเป็น"
+        } else {
+            Write-Result "PASS" "ADS002" "Service accounts: ทั้งหมดมีการใช้งาน"
+        }
+        
+        # Check for Kerberoastable accounts
+        $kerberoastable = Get-ADUser -Filter "ServicePrincipalName -like '*' -and DoesNotRequirePreAuth -eq '$false'" -Properties ServicePrincipalName
+        if ($kerberoastable) {
+            $kerbCount = ($kerberoastable | Measure-Object).Count
+            Write-Result "WARN" "ADS003" "Kerberoastable accounts: $kerbCount accounts" -Details ($kerberoastable.Name -join ", ") -Recommendation "ตรวจสอบและปกป้อง service accounts จาก Kerberoasting"
+        } else {
+            Write-Result "PASS" "ADS003" "Kerberoastable accounts: ไม่พบ"
+        }
+        
+        # Check for ASREPRoastable accounts
+        $asreproastable = Get-ADUser -Filter "DoesNotRequirePreAuth -eq '$true'" -Properties DoesNotRequirePreAuth
+        if ($asreproastable) {
+            $asrepCount = ($asreproastable | Measure-Object).Count
+            Write-Result "WARN" "ADS004" "ASREPRoastable accounts: $asrepCount accounts" -Details ($asreproastable.Name -join ", ") -Recommendation "เปิดใช้งาน Kerberos Pre-Authentication"
+        } else {
+            Write-Result "PASS" "ADS004" "ASREPRoastable accounts: ไม่พบ"
+        }
+        
+        # Check AdminSDHolder
+        try {
+            $adminSDHolder = Get-ADObject -Identity "CN=AdminSDHolder,CN=System,$($script:DomainInfo.DistinguishedName)" -Properties nTSecurityDescriptor
+            if ($adminSDHolder) {
+                Write-Result "PASS" "ADS005" "AdminSDHolder: พร้อมใช้งาน"
+            }
+        }
+        catch {
+            Write-Result "WARN" "ADS005" "AdminSDHolder: ไม่สามารถตรวจสอบได้"
+        }
+        
+        # Check for delegation issues
+        $unconstrainedDelegation = Get-ADComputer -Filter "TrustedForDelegation -eq '$true'" -Properties TrustedForDelegation
+        if ($unconstrainedDelegation) {
+            $delCount = ($unconstrainedDelegation | Measure-Object).Count
+            Write-Result "WARN" "ADS006" "Unconstrained Delegation: $delCount computers" -Details ($unconstrainedDelegation.Name -join ", ") -RiskLevel "High" -Recommendation "ตรวจสอบและจำกัด unconstrained delegation"
+        } else {
+            Write-Result "PASS" "ADS006" "Unconstrained Delegation: ไม่พบ"
+        }
+        
+        # Check SYSVOL permissions
+        if ($script:IsDomainController) {
+            try {
+                $sysvolPath = "C:\Windows\SYSVOL\sysvol\$($script:DomainInfo.DNSRoot)"
+                if (Test-Path $sysvolPath) {
+                    $sysvolACL = Get-Acl $sysvolPath
+                    $everyoneAccess = $sysvolACL.Access | Where-Object { $_.IdentityReference -eq "Everyone" -and $_.AccessControlType -eq "Allow" }
+                    
+                    if ($everyoneAccess -and $everyoneAccess.FileSystemRights -match "FullControl|Modify") {
+                        Write-Result "WARN" "ADS007" "SYSVOL Permissions: Everyone มีสิทธิ์มากเกินไป" -Recommendation "จำกัดสิทธิ์ SYSVOL"
+                    } else {
+                        Write-Result "PASS" "ADS007" "SYSVOL Permissions: เหมาะสม"
+                    }
+                }
+            }
+            catch {
+                Write-Result "WARN" "ADS007" "ไม่สามารถตรวจสอบ SYSVOL Permissions ได้"
+            }
+        }
+    }
+    catch {
+        Write-Result "WARN" "ADS999" "ไม่สามารถตรวจสอบความปลอดภัย AD เพิ่มเติมได้" -Details $_.Exception.Message
+    }
+}
+
+# 10. AD Replication and Health
+function Test-ADReplicationHealth {
+    if (-not $script:IsDomainController) {
+        Write-Host "`n=== 10. การตรวจสอบ AD Replication - ข้าม (ไม่ใช่ DC) ===" -ForegroundColor $Colors.HEADER
+        return
+    }
+    
+    Write-Host "`n=== 10. การตรวจสอบ AD Replication และ Health ===" -ForegroundColor $Colors.HEADER
+    
+    try {
+        # Check replication status
+        $replSummary = repadmin /replsummary 2>$null
+        if ($replSummary -and $replSummary -match "Experienced no failures") {
+            Write-Result "PASS" "REP001" "AD Replication Summary: ไม่มีความผิดพลาด"
+        } elseif ($replSummary -and $replSummary -match "failures") {
+            Write-Result "FAIL" "REP001" "AD Replication Summary: พบความผิดพลาด" -RiskLevel "High" -Recommendation "ตรวจสอบและแก้ไข replication errors"
+        } else {
+            Write-Result "WARN" "REP001" "AD Replication Summary: ไม่สามารถตรวจสอบได้"
+        }
+        
+        # Check KCC (Knowledge Consistency Checker)
+        $kccStatus = repadmin /kcc 2>$null
+        if ($kccStatus -match "completed successfully") {
+            Write-Result "PASS" "REP002" "KCC Status: ทำงานสำเร็จ"
+        } else {
+            Write-Result "WARN" "REP002" "KCC Status: อาจมีปัญหา"
+        }
+        
+        # Check for lingering objects
+        try {
+            $lingeringObjects = repadmin /removelingeringobjects /advisory 2>$null
+            if ($lingeringObjects -match "No lingering objects found") {
+                Write-Result "PASS" "REP003" "Lingering Objects: ไม่พบ"
+            } elseif ($lingeringObjects -match "lingering objects found") {
+                Write-Result "WARN" "REP003" "Lingering Objects: พบ lingering objects" -Recommendation "ทำความสะอาด lingering objects"
+            } else {
+                Write-Result "WARN" "REP003" "Lingering Objects: ไม่สามารถตรวจสอบได้"
+            }
+        }
+        catch {
+            Write-Result "WARN" "REP003" "ไม่สามารถตรวจสอบ Lingering Objects ได้"
+        }
+        
+        # Check FRS/DFSR (SYSVOL replication)
+        $dfsrService = Get-Service -Name "DFSR" -ErrorAction SilentlyContinue
+        $frsService = Get-Service -Name "NtFrs" -ErrorAction SilentlyContinue
+        
+        if ($dfsrService -and $dfsrService.Status -eq "Running") {
+            Write-Result "PASS" "REP004" "DFSR Service: กำลังทำงาน (แนะนำสำหรับ SYSVOL)"
+        } elseif ($frsService -and $frsService.Status -eq "Running") {
+            Write-Result "WARN" "REP004" "FRS Service: กำลังทำงาน" -Recommendation "ควร migrate จาก FRS ไป DFSR"
+        } else {
+            Write-Result "FAIL" "REP004" "SYSVOL Replication Service: ไม่ทำงาน" -RiskLevel "Critical"
+        }
+        
+        # Check directory service event logs for errors
+        try {
+            $dsErrors = Get-WinEvent -FilterHashtable @{LogName='Directory Service'; Level=2; StartTime=(Get-Date).AddHours(-24)} -MaxEvents 10 -ErrorAction SilentlyContinue
+            if ($dsErrors) {
+                $errorCount = ($dsErrors | Measure-Object).Count
+                Write-Result "WARN" "REP005" "Directory Service Errors: $errorCount errors ใน 24 ชั่วโมงที่ผ่านมา" -Recommendation "ตรวจสอบ Directory Service event log"
+            } else {
+                Write-Result "PASS" "REP005" "Directory Service Errors: ไม่พบ errors ใน 24 ชั่วโมงที่ผ่านมา"
+            }
+        }
+        catch {
+            Write-Result "WARN" "REP005" "ไม่สามารถตรวจสอบ Directory Service event log ได้"
+        }
+    }
+    catch {
+        Write-Result "WARN" "REP999" "ไม่สามารถตรวจสอบ AD Replication ได้" -Details $_.Exception.Message
+    }
+}
+
+# Generate summary report
+function Show-Summary {
+    Write-Host "`n=== สรุปผลการตรวจสอบ ===" -ForegroundColor $Colors.HEADER
+    Write-Host "ผ่าน (PASS): $script:PassCount" -ForegroundColor $Colors.PASS
+    Write-Host "ไม่ผ่าน (FAIL): $script:FailCount" -ForegroundColor $Colors.FAIL
+    Write-Host "เตือน (WARN): $script:WarnCount" -ForegroundColor $Colors.WARN
+    Write-Host "รวมการตรวจสอบ: $script:TotalChecks" -ForegroundColor White
+    
+    if ($script:TotalChecks -gt 0) {
+        $securityScore = [math]::Round(($script:PassCount * 100) / $script:TotalChecks, 1)
+        Write-Host "คะแนนความปลอดภัย: $securityScore/100" -ForegroundColor Cyan
+        
+        if ($securityScore -ge 85) {
+            Write-Host "ระดับความปลอดภัย: ดีเยี่ยม" -ForegroundColor $Colors.PASS
+        } elseif ($securityScore -ge 70) {
+            Write-Host "ระดับความปลอดภัย: ดี" -ForegroundColor $Colors.PASS
+        } elseif ($securityScore -ge 50) {
+            Write-Host "ระดับความปลอดภัย: ปานกลาง" -ForegroundColor $Colors.WARN
+        } else {
+            Write-Host "ระดับความปลอดภัย: ต้องปรับปรุงด่วน" -ForegroundColor $Colors.FAIL
+        }
+    }
+    
+    # Show critical issues
+    $criticalIssues = $script:Results | Where-Object { $_.RiskLevel -eq "Critical" -and $_.Status -eq "FAIL" }
+    if ($criticalIssues) {
+        Write-Host "`n⚠️  ปัญหาที่ต้องแก้ไขด่วน:" -ForegroundColor $Colors.CRITICAL
+        foreach ($issue in $criticalIssues) {
+            Write-Host "   • $($issue.Description)" -ForegroundColor $Colors.CRITICAL
+        }
+    }
+    
+    Write-Host "`nรายงานแบบละเอียดถูกบันทึกไว้ที่: $script:LogFile" -ForegroundColor Cyan
+    
+    if ($script:FailCount -gt 0 -or $script:WarnCount -gt 0) {
+        Write-Host "`n=== คำแนะนำการปรับปรุง ===" -ForegroundColor $Colors.WARN
+        Write-Host "1. แก้ไขปัญหาที่มีสถานะ FAIL และ RiskLevel Critical ทันที"
+        Write-Host "2. ตรวจสอบและแก้ไขรายการที่มีสถานะ FAIL อื่นๆ"
+        Write-Host "3. พิจารณาแก้ไขรายการที่มีสถานะ WARN ตามความเหมาะสม"
+        Write-Host "4. ทำการ backup การตั้งค่าและ AD database ก่อนแก้ไข"
+        Write-Host "5. ติดตั้ง Windows Updates และ security patches"
+        Write-Host "6. ตั้งค่า monitoring และ alerting สำหรับ AD services"
+        Write-Host "7. ทำการทดสอบ disaster recovery procedures"
+    }
+}
+
+# Export results to CSV
+function Export-Results {
+    if ($ExportResults) {
+        $csvPath = Join-Path $OutputPath "CIS_WindowsServer_AD_Audit_Results_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+        $script:Results | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+        Write-Host "`nผลลัพธ์ถูก export เป็น CSV ไว้ที่: $csvPath" -ForegroundColor Cyan
+    }
+}
+
+# Create hardening script
+function New-HardeningScript {
+    $hardeningScript = @"
+# CIS Windows Server AD Hardening Script
+# ⚠️  ใช้ความระมัดระวังอย่างยิ่งในการรัน script นี้
+# แนะนำให้ backup AD database และการตั้งค่าทั้งหมดก่อน
+# ทดสอบในสภาพแวดล้อม test lab ก่อนใช้กับ production
+
+Write-Host "สคริปต์นี้จะทำการ hardening Windows Server และ Active Directory ตาม CIS" -ForegroundColor Yellow
+Write-Host "⚠️  การดำเนินการนี้อาจส่งผลกระทบต่อการทำงานของระบบ" -ForegroundColor Red
+Write-Host "แนะนำให้ backup AD database และการตั้งค่าทั้งหมดก่อน" -ForegroundColor Red
+`$confirm = Read-Host "ต้องการดำเนินการต่อหรือไม่? (y/N)"
+
+if (`$confirm -ne 'y' -and `$confirm -ne 'Y') {
+    Write-Host "ยกเลิกการดำเนินการ" -ForegroundColor Red
+    exit
+}
+
+Write-Host "เริ่มการ hardening ระบบ..." -ForegroundColor Green
+
+# Create system backup notification
+Write-Host "สร้างการแจ้งเตือนสำหรับการ backup..." -ForegroundColor Cyan
+`$backupScript = @"
+# สำหรับ Domain Controller ควร backup:
+# 1. System State: wbadmin start systemstatebackup -backuptarget:D: -quiet
+# 2. AD Database: ntdsutil snapshot
+# 3. SYSVOL: robocopy C:\Windows\SYSVOL D:\Backup\SYSVOL /MIR
+Write-Host "กรุณาทำการ backup ดังนี้:" -ForegroundColor Yellow
+Write-Host "1. System State backup" -ForegroundColor White  
+Write-Host "2. Active Directory database" -ForegroundColor White
+Write-Host "3. SYSVOL folder" -ForegroundColor White
+"@
+
+# Account Security
+Write-Host "กำหนดค่า Account Security..." -ForegroundColor Cyan
+
+# Disable Guest account
+try {
+    Disable-ADAccount -Identity "Guest"
+    Write-Host "ปิดใช้งาน Guest account สำเร็จ" -ForegroundColor Green
+}
+catch {
+    Write-Host "ไม่สามารถปิดใช้งาน Guest account ได้" -ForegroundColor Yellow
+}
+
+# Set password policy (example - adjust as needed)
+Write-Host "กำหนดค่า Password Policy..." -ForegroundColor Cyan
+try {
+    Set-ADDefaultDomainPasswordPolicy -MinPasswordLength 14 -ComplexityEnabled `$true -PasswordHistoryCount 12 -MaxPasswordAge (New-TimeSpan -Days 90) -MinPasswordAge (New-TimeSpan -Days 1) -LockoutDuration (New-TimeSpan -Minutes 30) -LockoutObservationWindow (New-TimeSpan -Minutes 30) -LockoutThreshold 5
+    Write-Host "ตั้งค่า Password Policy สำเร็จ" -ForegroundColor Green
+}
+catch {
+    Write-Host "ไม่สามารถตั้งค่า Password Policy ได้: `$(`$_.Exception.Message)" -ForegroundColor Yellow
+}
+
+# Windows Firewall
+Write-Host "เปิดใช้งาน Windows Firewall..." -ForegroundColor Cyan
+netsh advfirewall set allprofiles state on
+netsh advfirewall set allprofiles firewallpolicy blockinbound,allowoutbound
+
+# Disable SMB1
+Write-Host "ปิดใช้งาน SMB1 Protocol..." -ForegroundColor Cyan
+try {
+    Set-SmbServerConfiguration -EnableSMB1Protocol `$false -Force
+    Write-Host "ปิดใช้งาน SMB1 สำเร็จ" -ForegroundColor Green
+}
+catch {
+    Write-Host "ไม่สามารถปิดใช้งาน SMB1 ได้" -ForegroundColor Yellow
+}
+
+# Enable SMB Signing
+Write-Host "เปิดใช้งาน SMB Signing..." -ForegroundColor Cyan
+try {
+    Set-SmbServerConfiguration -RequireSecuritySignature `$true -Force
+    Write-Host "เปิดใช้งาน SMB Signing สำเร็จ" -ForegroundColor Green
+}
+catch {
+    Write-Host "ไม่สามารถเปิดใช้งาน SMB Signing ได้" -ForegroundColor Yellow
+}
+
+# Registry Security Settings
+Write-Host "กำหนดค่า Registry Security..." -ForegroundColor Cyan
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\LSA" -Name "RestrictAnonymous" -Value 1 -Force
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\LSA" -Name "RestrictAnonymousSAM" -Value 1 -Force
+
+# LDAP Signing (Domain Controller)
+Write-Host "กำหนดค่า LDAP Signing..." -ForegroundColor Cyan
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters" -Name "LDAPServerIntegrity" -Value 2 -Force
+
+# Disable unnecessary services
+Write-Host "ปิดใช้งาน services ที่ไม่จำเป็น..." -ForegroundColor Cyan
+`$servicesToDisable = @("TlntSvr", "MSFTPSVC", "RemoteRegistry", "Messenger", "Browser")
+foreach (`$service in `$servicesToDisable) {
+    try {
+        Stop-Service `$service -Force -ErrorAction SilentlyContinue
+        Set-Service `$service -StartupType Disabled -ErrorAction SilentlyContinue
+        Write-Host "ปิดใช้งาน `$service สำเร็จ" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "ไม่สามารถปิดใช้งาน `$service ได้ (อาจไม่มีการติดตั้ง)" -ForegroundColor Yellow
+    }
+}
+
+# Event Log settings
+Write-Host "กำหนดค่า Event Logs..." -ForegroundColor Cyan
+try {
+    wevtutil sl Security /ms:104857600  # 100MB
+    wevtutil sl System /ms:52428800     # 50MB
+    wevtutil sl Application /ms:52428800 # 50MB
+    Write-Host "ตั้งค่า Event Log size สำเร็จ" -ForegroundColor Green
+}
+catch {
+    Write-Host "ไม่สามารถตั้งค่า Event Log ได้" -ForegroundColor Yellow
+}
+
+Write-Host "การ hardening เบื้องต้นเสร็จสิ้น" -ForegroundColor Green
+Write-Host ""
+Write-Host "ขั้นตอนถัดไป:" -ForegroundColor Yellow
+Write-Host "1. Restart ระบบ" -ForegroundColor White
+Write-Host "2. ตรวจสอบการทำงานของ AD services" -ForegroundColor White  
+Write-Host "3. ทดสอบการ login และ authentication" -ForegroundColor White
+Write-Host "4. รันการตรวจสอบอีกครั้งเพื่อยืนยันการปรับปรุง" -ForegroundColor White
+Write-Host "5. ทำการ backup หลังการ hardening" -ForegroundColor White
+"@
+
+    $hardeningPath = Join-Path $OutputPath "CIS_WindowsServer_AD_Hardening.ps1"
+    $hardeningScript | Out-File -FilePath $hardeningPath -Encoding UTF8
+    Write-Host "สร้าง hardening script ไว้ที่: $hardeningPath" -ForegroundColor Green
+    Write-Host "⚠️  กรุณาอ่านและทำความเข้าใจ script ก่อนใช้งาน" -ForegroundColor Red
+}
+
+# Show help
+function Show-Help {
+    Write-Host "CIS Windows Server Active Directory Security Audit Script" -ForegroundColor $Colors.HEADER
+    Write-Host "การใช้งาน: .\CIS_WindowsServer_AD_Audit.ps1 [parameters]" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Parameters:" -ForegroundColor Cyan
+    Write-Host "  -Help                   แสดงคำอธิบายการใช้งาน"
+    Write-Host "  -CreateHardening        สร้าง hardening script"
+    Write-Host "  -ExportResults          Export ผลลัพธ์เป็น CSV"
+    Write-Host "  -DetailedAD             ตรวจสอบ AD แบบละเอียด"
+    Write-Host "  -OutputPath <path>      กำหนด path สำหรับ output files"
+    Write-Host "  -DomainName <domain>    ระบุ domain name เฉพาะ"
+    Write-Host ""
+    Write-Host "ตัวอย่าง:" -ForegroundColor Yellow
+    Write-Host "  .\CIS_WindowsServer_AD_Audit.ps1"
+    Write-Host "  .\CIS_WindowsServer_AD_Audit.ps1 -ExportResults -DetailedAD"
+    Write-Host "  .\CIS_WindowsServer_AD_Audit.ps1 -CreateHardening -OutputPath D:\Security"
+    Write-Host "  .\CIS_WindowsServer_AD_Audit.ps1 -DomainName contoso.com"
+    Write-Host ""
+    Write-Host "หมายเหตุ:" -ForegroundColor Red
+    Write-Host "• ต้องรันในสิทธิ์ Administrator"
+    Write-Host "• ต้องติดตั้ง Active Directory PowerShell Module"
+    Write-Host "• สำหรับการตรวจสอบครบถ้วน ควรรันบน Domain Controller"
+}
+
+# Main execution
+if ($Help) {
+    Show-Help
+    exit
+}
+
+if ($CreateHardening) {
+    Initialize-Script
+    New-HardeningScript
+    exit
+}
+
+# Run security audit
+try {
+    Initialize-Script
+    Get-SystemAndDomainInfo
+    Test-DomainControllerSecurity
+    Test-ADUsersAndGroups
+    Test-PasswordPolicies
+    Test-GroupPolicySecurity
+    Test-DNSSecurity
+    Test-NetworkServicesSecurity
+    Test-WindowsServerSecurity
+    Test-CertificateServicesSecurity
+    Test-AdditionalADSecurity
+    Test-ADReplicationHealth
+    Show-Summary
+    Export-Results
+    
+    Write-Host "`nการตรวจสอบเสร็จสิ้น!" -ForegroundColor $Colors.PASS
+}
+catch {
+    Write-Host "เกิดข้อผิดพลาดในการรัน script: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "กรุณาตรวจสอบสิทธิ์และการติดตั้ง required modules" -ForegroundColor Yellow
+}

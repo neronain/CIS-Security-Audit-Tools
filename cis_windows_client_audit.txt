@@ -1,0 +1,763 @@
+# CIS Windows 10/11 Security Audit Script
+# Version: 1.0
+# Author: Security Audit Tool
+# Description: ตรวจสอบการตั้งค่าความปลอดภัยของ Windows 10/11 ตามมาตรฐาน CIS
+# Requires: PowerShell 5.1+, Run as Administrator
+
+param(
+    [switch]$Help,
+    [switch]$CreateHardening,
+    [switch]$ExportResults,
+    [string]$OutputPath = "C:\Temp"
+)
+
+# Global Variables
+$script:PassCount = 0
+$script:FailCount = 0
+$script:WarnCount = 0
+$script:TotalChecks = 0
+$script:LogFile = ""
+$script:Results = @()
+
+# Color definitions for console output
+$Colors = @{
+    'PASS' = 'Green'
+    'FAIL' = 'Red'
+    'WARN' = 'Yellow'
+    'INFO' = 'Cyan'
+    'HEADER' = 'Magenta'
+}
+
+# Initialize script
+function Initialize-Script {
+    Clear-Host
+    
+    # Check PowerShell version
+    if ($PSVersionTable.PSVersion.Major -lt 5) {
+        Write-Host "ต้องการ PowerShell 5.1 หรือใหม่กว่า" -ForegroundColor Red
+        exit 1
+    }
+    
+    # Check if running as Administrator
+    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Host "กรุณารันสคริปต์นี้ในสิทธิ์ Administrator" -ForegroundColor Red
+        exit 1
+    }
+    
+    # Create output directory
+    if (-not (Test-Path $OutputPath)) {
+        New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
+    }
+    
+    # Set log file path
+    $script:LogFile = Join-Path $OutputPath "CIS_Windows_Audit_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+    
+    # Display header
+    Write-Host "╔════════════════════════════════════════════════════════════════╗" -ForegroundColor $Colors.HEADER
+    Write-Host "║           CIS Windows 10/11 Security Audit Script             ║" -ForegroundColor $Colors.HEADER
+    Write-Host "║                        Version 1.0                            ║" -ForegroundColor $Colors.HEADER
+    Write-Host "╚════════════════════════════════════════════════════════════════╝" -ForegroundColor $Colors.HEADER
+    Write-Host ""
+}
+
+# Function to write results
+function Write-Result {
+    param(
+        [string]$Status,
+        [string]$CheckID,
+        [string]$Description,
+        [string]$Details = "",
+        [string]$Recommendation = ""
+    )
+    
+    $script:TotalChecks++
+    
+    # Create result object
+    $resultObj = [PSCustomObject]@{
+        CheckID = $CheckID
+        Status = $Status
+        Description = $Description
+        Details = $Details
+        Recommendation = $Recommendation
+        Timestamp = Get-Date
+    }
+    
+    $script:Results += $resultObj
+    
+    # Update counters
+    switch ($Status) {
+        'PASS' { $script:PassCount++ }
+        'FAIL' { $script:FailCount++ }
+        'WARN' { $script:WarnCount++ }
+    }
+    
+    # Display to console
+    $statusText = "[$Status]".PadRight(6)
+    Write-Host $statusText -ForegroundColor $Colors[$Status] -NoNewline
+    Write-Host " $Description"
+    
+    if ($Details) {
+        Write-Host "       รายละเอียด: $Details" -ForegroundColor Gray
+    }
+    
+    if ($Recommendation) {
+        Write-Host "       คำแนะนำ: $Recommendation" -ForegroundColor Gray
+    }
+    
+    # Log to file
+    $logEntry = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [$Status] $CheckID - $Description"
+    if ($Details) { $logEntry += " | Details: $Details" }
+    if ($Recommendation) { $logEntry += " | Recommendation: $Recommendation" }
+    
+    Add-Content -Path $script:LogFile -Value $logEntry
+}
+
+# Function to get system information
+function Get-SystemInfo {
+    Write-Host "`n=== ข้อมูลระบบ ===" -ForegroundColor $Colors.HEADER
+    
+    $os = Get-CimInstance -ClassName Win32_OperatingSystem
+    $computer = Get-CimInstance -ClassName Win32_ComputerSystem
+    
+    Write-Result "INFO" "SYS001" "OS Version: $($os.Caption) Build $($os.BuildNumber)"
+    Write-Result "INFO" "SYS002" "Computer Name: $($computer.Name)"
+    Write-Result "INFO" "SYS003" "Domain: $($computer.Domain)"
+    Write-Result "INFO" "SYS004" "Total Physical Memory: $([math]::Round($computer.TotalPhysicalMemory/1GB, 2)) GB"
+    Write-Result "INFO" "SYS005" "Log File: $script:LogFile"
+}
+
+# 1. Account Policies
+function Test-AccountPolicies {
+    Write-Host "`n=== 1. การตรวจสอบ Account Policies ===" -ForegroundColor $Colors.HEADER
+    
+    try {
+        # Get security policy
+        $secpol = secedit /export /cfg "$env:TEMP\secpol.cfg" /quiet
+        $secpolContent = Get-Content "$env:TEMP\secpol.cfg" -ErrorAction SilentlyContinue
+        
+        if ($secpolContent) {
+            # Password Policy
+            $minPwdLength = ($secpolContent | Where-Object { $_ -match "MinimumPasswordLength" }) -replace ".*= "
+            if ([int]$minPwdLength -ge 14) {
+                Write-Result "PASS" "ACC001" "Minimum Password Length: $minPwdLength"
+            } elseif ([int]$minPwdLength -ge 8) {
+                Write-Result "WARN" "ACC001" "Minimum Password Length: $minPwdLength" -Recommendation "แนะนำให้ตั้งค่าเป็น 14 ตัวอักษรหรือมากกว่า"
+            } else {
+                Write-Result "FAIL" "ACC001" "Minimum Password Length: $minPwdLength" -Recommendation "ต้องตั้งค่าอย่างน้อย 8 ตัวอักษร"
+            }
+            
+            # Password complexity
+            $pwdComplexity = ($secpolContent | Where-Object { $_ -match "PasswordComplexity" }) -replace ".*= "
+            if ($pwdComplexity -eq "1") {
+                Write-Result "PASS" "ACC002" "Password Complexity: เปิดใช้งาน"
+            } else {
+                Write-Result "FAIL" "ACC002" "Password Complexity: ปิดใช้งาน" -Recommendation "ควรเปิดใช้งาน Password Complexity"
+            }
+            
+            # Account lockout threshold
+            $lockoutThreshold = ($secpolContent | Where-Object { $_ -match "LockoutBadCount" }) -replace ".*= "
+            if ([int]$lockoutThreshold -le 5 -and [int]$lockoutThreshold -gt 0) {
+                Write-Result "PASS" "ACC003" "Account Lockout Threshold: $lockoutThreshold"
+            } else {
+                Write-Result "FAIL" "ACC003" "Account Lockout Threshold: $lockoutThreshold" -Recommendation "แนะนำให้ตั้งค่าระหว่าง 1-5"
+            }
+        }
+        
+        # Clean up temp file
+        Remove-Item "$env:TEMP\secpol.cfg" -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-Result "WARN" "ACC999" "ไม่สามารถตรวจสอบ Account Policies ได้" -Details $_.Exception.Message
+    }
+}
+
+# 2. Local Policies
+function Test-LocalPolicies {
+    Write-Host "`n=== 2. การตรวจสอบ Local Policies ===" -ForegroundColor $Colors.HEADER
+    
+    # User Rights Assignment
+    try {
+        # Check if Guest account is disabled
+        $guestAccount = Get-LocalUser -Name "Guest" -ErrorAction SilentlyContinue
+        if ($guestAccount -and -not $guestAccount.Enabled) {
+            Write-Result "PASS" "LOC001" "Guest Account: ปิดใช้งาน"
+        } elseif ($guestAccount -and $guestAccount.Enabled) {
+            Write-Result "FAIL" "LOC001" "Guest Account: เปิดใช้งาน" -Recommendation "ควรปิดใช้งาน Guest Account"
+        } else {
+            Write-Result "WARN" "LOC001" "Guest Account: ไม่พบ"
+        }
+        
+        # Check Administrator account rename
+        $adminAccount = Get-LocalUser | Where-Object { $_.SID -like "*-500" }
+        if ($adminAccount.Name -ne "Administrator") {
+            Write-Result "PASS" "LOC002" "Administrator Account: ถูกเปลี่ยนชื่อเป็น '$($adminAccount.Name)'"
+        } else {
+            Write-Result "WARN" "LOC002" "Administrator Account: ยังใช้ชื่อ 'Administrator'" -Recommendation "ควรเปลี่ยนชื่อ Administrator account"
+        }
+    }
+    catch {
+        Write-Result "WARN" "LOC999" "ไม่สามารถตรวจสอบ Local User Accounts ได้" -Details $_.Exception.Message
+    }
+    
+    # Security Options via Registry
+    $securityChecks = @(
+        @{
+            ID = "LOC003"
+            Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
+            Name = "ClearPageFileAtShutdown"
+            ExpectedValue = 1
+            Description = "Clear Virtual Memory Pagefile"
+        },
+        @{
+            ID = "LOC004"
+            Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+            Name = "LimitBlankPasswordUse"
+            ExpectedValue = 1
+            Description = "Accounts: Limit local account use of blank passwords"
+        },
+        @{
+            ID = "LOC005"
+            Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+            Name = "NoLMHash"
+            ExpectedValue = 1
+            Description = "Network security: Do not store LAN Manager hash"
+        }
+    )
+    
+    foreach ($check in $securityChecks) {
+        try {
+            $value = Get-ItemProperty -Path $check.Path -Name $check.Name -ErrorAction SilentlyContinue
+            if ($value -and $value.($check.Name) -eq $check.ExpectedValue) {
+                Write-Result "PASS" $check.ID $check.Description
+            } else {
+                Write-Result "FAIL" $check.ID $check.Description -Recommendation "ค่าควรเป็น $($check.ExpectedValue)"
+            }
+        }
+        catch {
+            Write-Result "WARN" $check.ID $check.Description -Details "ไม่สามารถอ่านค่าได้"
+        }
+    }
+}
+
+# 3. Windows Firewall
+function Test-WindowsFirewall {
+    Write-Host "`n=== 3. การตรวจสอบ Windows Firewall ===" -ForegroundColor $Colors.HEADER
+    
+    try {
+        $firewallProfiles = @('Domain', 'Private', 'Public')
+        
+        foreach ($profile in $firewallProfiles) {
+            $fw = Get-NetFirewallProfile -Name $profile
+            
+            if ($fw.Enabled -eq $true) {
+                Write-Result "PASS" "FW00$($firewallProfiles.IndexOf($profile) + 1)" "Windows Firewall ($profile): เปิดใช้งาน"
+            } else {
+                Write-Result "FAIL" "FW00$($firewallProfiles.IndexOf($profile) + 1)" "Windows Firewall ($profile): ปิดใช้งาน" -Recommendation "ควรเปิดใช้งาน Firewall"
+            }
+            
+            # Check inbound/outbound rules
+            if ($fw.DefaultInboundAction -eq 'Block') {
+                Write-Result "PASS" "FW00$($firewallProfiles.IndexOf($profile) + 4)" "Default Inbound Action ($profile): Block"
+            } else {
+                Write-Result "WARN" "FW00$($firewallProfiles.IndexOf($profile) + 4)" "Default Inbound Action ($profile): $($fw.DefaultInboundAction)" -Recommendation "แนะนำให้ตั้งเป็น Block"
+            }
+        }
+    }
+    catch {
+        Write-Result "WARN" "FW999" "ไม่สามารถตรวจสอบ Windows Firewall ได้" -Details $_.Exception.Message
+    }
+}
+
+# 4. Windows Defender
+function Test-WindowsDefender {
+    Write-Host "`n=== 4. การตรวจสอบ Windows Defender ===" -ForegroundColor $Colors.HEADER
+    
+    try {
+        $defender = Get-MpPreference -ErrorAction SilentlyContinue
+        $status = Get-MpComputerStatus -ErrorAction SilentlyContinue
+        
+        if ($status) {
+            # Real-time protection
+            if ($status.RealTimeProtectionEnabled) {
+                Write-Result "PASS" "DEF001" "Real-time Protection: เปิดใช้งาน"
+            } else {
+                Write-Result "FAIL" "DEF001" "Real-time Protection: ปิดใช้งาน" -Recommendation "ควรเปิดใช้งาน Real-time Protection"
+            }
+            
+            # Antivirus signature version
+            $signatureAge = (Get-Date) - $status.AntivirusSignatureLastUpdated
+            if ($signatureAge.Days -le 7) {
+                Write-Result "PASS" "DEF002" "Antivirus Signatures: อัพเดทล่าสุด $($signatureAge.Days) วันที่แล้ว"
+            } else {
+                Write-Result "WARN" "DEF002" "Antivirus Signatures: อัพเดทล่าสุด $($signatureAge.Days) วันที่แล้ว" -Recommendation "ควรอัพเดท signature"
+            }
+            
+            # Cloud protection
+            if ($defender -and $defender.MAPSReporting -ne 0) {
+                Write-Result "PASS" "DEF003" "Cloud Protection: เปิดใช้งาน"
+            } else {
+                Write-Result "WARN" "DEF003" "Cloud Protection: ปิดใช้งาน" -Recommendation "แนะนำให้เปิดใช้งาน Cloud Protection"
+            }
+        } else {
+            Write-Result "WARN" "DEF999" "ไม่สามารถตรวจสอบ Windows Defender ได้"
+        }
+    }
+    catch {
+        Write-Result "WARN" "DEF999" "ไม่สามารถตรวจสอบ Windows Defender ได้" -Details $_.Exception.Message
+    }
+}
+
+# 5. Windows Updates
+function Test-WindowsUpdates {
+    Write-Host "`n=== 5. การตรวจสอบ Windows Updates ===" -ForegroundColor $Colors.HEADER
+    
+    try {
+        # Check Windows Update service
+        $wuService = Get-Service -Name "wuauserv" -ErrorAction SilentlyContinue
+        if ($wuService -and $wuService.Status -eq "Running") {
+            Write-Result "PASS" "UPD001" "Windows Update Service: กำลังทำงาน"
+        } else {
+            Write-Result "WARN" "UPD001" "Windows Update Service: ไม่ทำงาน" -Recommendation "ควรเปิดใช้งาน Windows Update Service"
+        }
+        
+        # Check automatic updates setting
+        $auOptions = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update" -Name "AUOptions" -ErrorAction SilentlyContinue
+        if ($auOptions -and $auOptions.AUOptions -eq 4) {
+            Write-Result "PASS" "UPD002" "Automatic Updates: เปิดใช้งาน (Install automatically)"
+        } elseif ($auOptions -and $auOptions.AUOptions -eq 3) {
+            Write-Result "WARN" "UPD002" "Automatic Updates: Download และแจ้งเตือนการติดตั้ง" -Recommendation "แนะนำให้ตั้งค่าติดตั้งอัตโนมัติ"
+        } else {
+            Write-Result "FAIL" "UPD002" "Automatic Updates: ปิดใช้งานหรือตั้งค่าไม่เหมาะสม" -Recommendation "ควรเปิดใช้งาน Automatic Updates"
+        }
+        
+        # Check last update installation
+        try {
+            $lastUpdate = Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 1
+            if ($lastUpdate) {
+                $daysSinceUpdate = (Get-Date) - $lastUpdate.InstalledOn
+                if ($daysSinceUpdate.Days -le 30) {
+                    Write-Result "PASS" "UPD003" "Last Update: $($daysSinceUpdate.Days) วันที่แล้ว ($($lastUpdate.HotFixID))"
+                } else {
+                    Write-Result "WARN" "UPD003" "Last Update: $($daysSinceUpdate.Days) วันที่แล้ว ($($lastUpdate.HotFixID))" -Recommendation "ควรตรวจสอบและติดตั้ง updates"
+                }
+            }
+        }
+        catch {
+            Write-Result "WARN" "UPD003" "ไม่สามารถตรวจสอบข้อมูล Updates ล่าสุดได้"
+        }
+    }
+    catch {
+        Write-Result "WARN" "UPD999" "ไม่สามารถตรวจสอบ Windows Updates ได้" -Details $_.Exception.Message
+    }
+}
+
+# 6. Network Security
+function Test-NetworkSecurity {
+    Write-Host "`n=== 6. การตรวจสอบ Network Security ===" -ForegroundColor $Colors.HEADER
+    
+    # Network sharing and discovery
+    try {
+        $networkDiscovery = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Network\NewNetworkWindowOff" -ErrorAction SilentlyContinue
+        if ($networkDiscovery) {
+            Write-Result "PASS" "NET001" "Network Discovery: ปิดใช้งาน"
+        } else {
+            Write-Result "WARN" "NET001" "Network Discovery: อาจเปิดใช้งาน" -Recommendation "ควรปิดใช้งานในเครือข่ายสาธารณะ"
+        }
+        
+        # File and printer sharing
+        $fileSharing = Get-SmbServerConfiguration
+        if (-not $fileSharing.EnableSMB1Protocol) {
+            Write-Result "PASS" "NET002" "SMB1 Protocol: ปิดใช้งาน"
+        } else {
+            Write-Result "FAIL" "NET002" "SMB1 Protocol: เปิดใช้งาน" -Recommendation "ควรปิดใช้งาน SMB1 Protocol เนื่องจากไม่ปลอดภัย"
+        }
+        
+        # Remote Desktop
+        $rdp = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -ErrorAction SilentlyContinue
+        if ($rdp -and $rdp.fDenyTSConnections -eq 1) {
+            Write-Result "PASS" "NET003" "Remote Desktop: ปิดใช้งาน"
+        } else {
+            Write-Result "WARN" "NET003" "Remote Desktop: เปิดใช้งาน" -Recommendation "ตรวจสอบว่าจำเป็นต้องใช้งาน RDP หรือไม่"
+        }
+        
+        # Network Level Authentication for RDP
+        if ($rdp -and $rdp.fDenyTSConnections -eq 0) {
+            $nla = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -ErrorAction SilentlyContinue
+            if ($nla -and $nla.UserAuthentication -eq 1) {
+                Write-Result "PASS" "NET004" "RDP Network Level Authentication: เปิดใช้งาน"
+            } else {
+                Write-Result "FAIL" "NET004" "RDP Network Level Authentication: ปิดใช้งาน" -Recommendation "ควรเปิดใช้งาน NLA สำหรับ RDP"
+            }
+        }
+    }
+    catch {
+        Write-Result "WARN" "NET999" "ไม่สามารถตรวจสอบ Network Security ได้" -Details $_.Exception.Message
+    }
+}
+
+# 7. System Services
+function Test-SystemServices {
+    Write-Host "`n=== 7. การตรวจสอบ System Services ===" -ForegroundColor $Colors.HEADER
+    
+    # List of potentially dangerous services
+    $dangerousServices = @(
+        @{ Name = "Telnet"; Service = "TlntSvr"; Description = "Telnet Service" },
+        @{ Name = "FTP"; Service = "MSFTPSVC"; Description = "FTP Service" },
+        @{ Name = "SNMP"; Service = "SNMP"; Description = "SNMP Service" },
+        @{ Name = "RemoteRegistry"; Service = "RemoteRegistry"; Description = "Remote Registry Service" },
+        @{ Name = "Messenger"; Service = "Messenger"; Description = "Messenger Service" }
+    )
+    
+    foreach ($svc in $dangerousServices) {
+        try {
+            $service = Get-Service -Name $svc.Service -ErrorAction SilentlyContinue
+            if ($service) {
+                if ($service.Status -eq "Stopped" -and $service.StartType -eq "Disabled") {
+                    Write-Result "PASS" "SVC00$($dangerousServices.IndexOf($svc) + 1)" "$($svc.Description): ปิดใช้งาน"
+                } elseif ($service.Status -eq "Stopped") {
+                    Write-Result "WARN" "SVC00$($dangerousServices.IndexOf($svc) + 1)" "$($svc.Description): หยุดทำงานแต่ยังไม่ได้ disable" -Recommendation "ควร disable service นี้"
+                } else {
+                    Write-Result "FAIL" "SVC00$($dangerousServices.IndexOf($svc) + 1)" "$($svc.Description): กำลังทำงาน" -Recommendation "ควรหยุดและ disable service นี้"
+                }
+            } else {
+                Write-Result "PASS" "SVC00$($dangerousServices.IndexOf($svc) + 1)" "$($svc.Description): ไม่มีการติดตั้ง"
+            }
+        }
+        catch {
+            Write-Result "WARN" "SVC00$($dangerousServices.IndexOf($svc) + 1)" "ไม่สามารถตรวจสอบ $($svc.Description) ได้"
+        }
+    }
+    
+    # Essential services check
+    $essentialServices = @("EventLog", "Winmgmt", "RpcSs", "Dhcp")
+    foreach ($essential in $essentialServices) {
+        try {
+            $service = Get-Service -Name $essential -ErrorAction SilentlyContinue
+            if ($service -and $service.Status -eq "Running") {
+                Write-Result "PASS" "SVC10$($essentialServices.IndexOf($essential) + 1)" "$essential Service: กำลังทำงาน"
+            } else {
+                Write-Result "WARN" "SVC10$($essentialServices.IndexOf($essential) + 1)" "$essential Service: ไม่ทำงาน" -Recommendation "ตรวจสอบสาเหตุที่ service สำคัญไม่ทำงาน"
+            }
+        }
+        catch {
+            Write-Result "WARN" "SVC10$($essentialServices.IndexOf($essential) + 1)" "ไม่สามารถตรวจสอบ $essential Service ได้"
+        }
+    }
+}
+
+# 8. Registry Security
+function Test-RegistrySecurity {
+    Write-Host "`n=== 8. การตรวจสอบ Registry Security ===" -ForegroundColor $Colors.HEADER
+    
+    $registryChecks = @(
+        @{
+            ID = "REG001"
+            Path = "HKLM:\SYSTEM\CurrentControlSet\Control\LSA"
+            Name = "RestrictAnonymous"
+            ExpectedValue = 1
+            Description = "Restrict Anonymous Access"
+        },
+        @{
+            ID = "REG002"
+            Path = "HKLM:\SYSTEM\CurrentControlSet\Control\LSA"
+            Name = "RestrictAnonymousSAM"
+            ExpectedValue = 1
+            Description = "Restrict Anonymous SAM Access"
+        },
+        @{
+            ID = "REG003"
+            Path = "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters"
+            Name = "AutoShareWks"
+            ExpectedValue = 0
+            Description = "Disable Administrative Shares"
+        },
+        @{
+            ID = "REG004"
+            Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+            Name = "EnableLUA"
+            ExpectedValue = 1
+            Description = "User Account Control (UAC)"
+        },
+        @{
+            ID = "REG005"
+            Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+            Name = "ConsentPromptBehaviorAdmin"
+            ExpectedValue = 2
+            Description = "UAC: Behavior for Admin Approval Mode"
+        }
+    )
+    
+    foreach ($check in $registryChecks) {
+        try {
+            $value = Get-ItemProperty -Path $check.Path -Name $check.Name -ErrorAction SilentlyContinue
+            if ($value -and $value.($check.Name) -eq $check.ExpectedValue) {
+                Write-Result "PASS" $check.ID $check.Description
+            } else {
+                $currentValue = if ($value) { $value.($check.Name) } else { "ไม่พบ" }
+                Write-Result "FAIL" $check.ID $check.Description -Details "ค่าปัจจุบัน: $currentValue" -Recommendation "ค่าควรเป็น $($check.ExpectedValue)"
+            }
+        }
+        catch {
+            Write-Result "WARN" $check.ID $check.Description -Details "ไม่สามารถอ่านค่า Registry ได้"
+        }
+    }
+}
+
+# 9. Audit Policy
+function Test-AuditPolicy {
+    Write-Host "`n=== 9. การตรวจสอบ Audit Policy ===" -ForegroundColor $Colors.HEADER
+    
+    try {
+        $auditCategories = @(
+            "Account Logon",
+            "Account Management", 
+            "Logon/Logoff",
+            "Object Access",
+            "Policy Change",
+            "Privilege Use",
+            "System"
+        )
+        
+        foreach ($category in $auditCategories) {
+            try {
+                $auditResult = auditpol /get /category:"$category" 2>$null
+                if ($auditResult -match "Success and Failure") {
+                    Write-Result "PASS" "AUD00$($auditCategories.IndexOf($category) + 1)" "Audit $category: Success and Failure"
+                } elseif ($auditResult -match "Success|Failure") {
+                    Write-Result "WARN" "AUD00$($auditCategories.IndexOf($category) + 1)" "Audit $category: บางส่วน" -Recommendation "แนะนำให้ตั้งค่า Success and Failure"
+                } else {
+                    Write-Result "FAIL" "AUD00$($auditCategories.IndexOf($category) + 1)" "Audit $category: ไม่ได้เปิดใช้งาน" -Recommendation "ควรเปิดใช้งาน audit สำหรับหมวดหมู่นี้"
+                }
+            }
+            catch {
+                Write-Result "WARN" "AUD00$($auditCategories.IndexOf($category) + 1)" "ไม่สามารถตรวจสอบ Audit $category ได้"
+            }
+        }
+    }
+    catch {
+        Write-Result "WARN" "AUD999" "ไม่สามารถตรวจสอบ Audit Policy ได้" -Details $_.Exception.Message
+    }
+}
+
+# 10. Additional Security Checks
+function Test-AdditionalSecurity {
+    Write-Host "`n=== 10. การตรวจสอบความปลอดภัยเพิ่มเติม ===" -ForegroundColor $Colors.HEADER
+    
+    # BitLocker Status
+    try {
+        $bitlockerVolumes = Get-BitLockerVolume -ErrorAction SilentlyContinue
+        if ($bitlockerVolumes) {
+            $systemDrive = $bitlockerVolumes | Where-Object { $_.MountPoint -eq "C:" }
+            if ($systemDrive -and $systemDrive.ProtectionStatus -eq "On") {
+                Write-Result "PASS" "ADD001" "BitLocker: เปิดใช้งานสำหรับ System Drive"
+            } else {
+                Write-Result "WARN" "ADD001" "BitLocker: ไม่ได้เปิดใช้งานสำหรับ System Drive" -Recommendation "แนะนำให้เปิดใช้งาน BitLocker"
+            }
+        } else {
+            Write-Result "WARN" "ADD001" "BitLocker: ไม่สามารถตรวจสอบได้"
+        }
+    }
+    catch {
+        Write-Result "WARN" "ADD001" "BitLocker: ไม่สามารถตรวจสอบได้"
+    }
+    
+    # PowerShell Execution Policy
+    try {
+        $executionPolicy = Get-ExecutionPolicy
+        if ($executionPolicy -eq "Restricted" -or $executionPolicy -eq "RemoteSigned") {
+            Write-Result "PASS" "ADD002" "PowerShell Execution Policy: $executionPolicy"
+        } else {
+            Write-Result "WARN" "ADD002" "PowerShell Execution Policy: $executionPolicy" -Recommendation "แนะนำให้ตั้งค่าเป็น RemoteSigned หรือ Restricted"
+        }
+    }
+    catch {
+        Write-Result "WARN" "ADD002" "ไม่สามารถตรวจสอบ PowerShell Execution Policy ได้"
+    }
+    
+    # Windows Script Host
+    try {
+        $wshEnabled = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows Script Host\Settings" -Name "Enabled" -ErrorAction SilentlyContinue
+        if ($wshEnabled -and $wshEnabled.Enabled -eq 0) {
+            Write-Result "PASS" "ADD003" "Windows Script Host: ปิดใช้งาน"
+        } else {
+            Write-Result "WARN" "ADD003" "Windows Script Host: เปิดใช้งาน" -Recommendation "พิจารณาปิดใช้งานหากไม่จำเป็น"
+        }
+    }
+    catch {
+        Write-Result "WARN" "ADD003" "ไม่สามารถตรวจสอบ Windows Script Host ได้"
+    }
+    
+    # USB Device Control
+    try {
+        $usbPolicy = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR" -Name "Start" -ErrorAction SilentlyContinue
+        if ($usbPolicy -and $usbPolicy.Start -eq 4) {
+            Write-Result "PASS" "ADD004" "USB Storage: ปิดใช้งาน"
+        } else {
+            Write-Result "WARN" "ADD004" "USB Storage: เปิดใช้งาน" -Recommendation "พิจารณาควบคุมการใช้งาน USB Storage"
+        }
+    }
+    catch {
+        Write-Result "WARN" "ADD004" "ไม่สามารถตรวจสอบ USB Storage Policy ได้"
+    }
+}
+
+# Generate summary report
+function Show-Summary {
+    Write-Host "`n=== สรุปผลการตรวจสอบ ===" -ForegroundColor $Colors.HEADER
+    Write-Host "ผ่าน (PASS): $script:PassCount" -ForegroundColor $Colors.PASS
+    Write-Host "ไม่ผ่าน (FAIL): $script:FailCount" -ForegroundColor $Colors.FAIL
+    Write-Host "เตือน (WARN): $script:WarnCount" -ForegroundColor $Colors.WARN
+    Write-Host "รวมการตรวจสอบ: $script:TotalChecks" -ForegroundColor White
+    
+    if ($script:TotalChecks -gt 0) {
+        $securityScore = [math]::Round(($script:PassCount * 100) / $script:TotalChecks, 1)
+        Write-Host "คะแนนความปลอดภัย: $securityScore/100" -ForegroundColor Cyan
+        
+        if ($securityScore -ge 80) {
+            Write-Host "ระดับความปลอดภัย: ดีมาก" -ForegroundColor $Colors.PASS
+        } elseif ($securityScore -ge 60) {
+            Write-Host "ระดับความปลอดภัย: ปานกลาง" -ForegroundColor $Colors.WARN
+        } else {
+            Write-Host "ระดับความปลอดภัย: ต้องปรับปรุง" -ForegroundColor $Colors.FAIL
+        }
+    }
+    
+    Write-Host "`nรายงานแบบละเอียดถูกบันทึกไว้ที่: $script:LogFile" -ForegroundColor Cyan
+    
+    if ($script:FailCount -gt 0 -or $script:WarnCount -gt 0) {
+        Write-Host "`n=== คำแนะนำการปรับปรุง ===" -ForegroundColor $Colors.WARN
+        Write-Host "1. ตรวจสอบและแก้ไขรายการที่มีสถานะ FAIL ทันที"
+        Write-Host "2. พิจารณาแก้ไขรายการที่มีสถานะ WARN ตามความเหมาะสม"
+        Write-Host "3. ทำการ backup การตั้งค่าปัจจุบันก่อนแก้ไข"
+        Write-Host "4. ติดตั้ง Windows Updates ให้เป็นปัจจุบัน"
+        Write-Host "5. ตั้งค่า monitoring และ logging อย่างเหมาะสม"
+    }
+}
+
+# Export results to CSV
+function Export-Results {
+    if ($ExportResults) {
+        $csvPath = Join-Path $OutputPath "CIS_Windows_Audit_Results_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+        $script:Results | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+        Write-Host "`nผลลัพธ์ถูก export เป็น CSV ไว้ที่: $csvPath" -ForegroundColor Cyan
+    }
+}
+
+# Create hardening script
+function New-HardeningScript {
+    $hardeningScript = @"
+# CIS Windows 10/11 Hardening Script
+# ใช้ความระมัดระวังในการรัน script นี้
+# แนะนำให้ backup การตั้งค่าและทดสอบในสภาพแวดล้อม test ก่อน
+
+Write-Host "สคริปต์นี้จะทำการ hardening ระบบ Windows ตาม CIS" -ForegroundColor Yellow
+Write-Host "กรุณา backup การตั้งค่าปัจจุบันก่อน" -ForegroundColor Red
+`$confirm = Read-Host "ต้องการดำเนินการต่อหรือไม่? (y/N)"
+
+if (`$confirm -ne 'y' -and `$confirm -ne 'Y') {
+    Write-Host "ยกเลิกการดำเนินการ" -ForegroundColor Red
+    exit
+}
+
+Write-Host "เริ่มการ hardening ระบบ..." -ForegroundColor Green
+
+# Account Policies
+Write-Host "กำหนดค่า Account Policies..." -ForegroundColor Cyan
+net accounts /minpwlen:14 /maxpwage:90 /minpwage:1 /uniquepw:12
+
+# Disable Guest Account
+Write-Host "ปิดใช้งาน Guest Account..." -ForegroundColor Cyan
+net user guest /active:no
+
+# Windows Firewall
+Write-Host "เปิดใช้งาน Windows Firewall..." -ForegroundColor Cyan
+netsh advfirewall set allprofiles state on
+netsh advfirewall set allprofiles firewallpolicy blockinbound,allowoutbound
+
+# Disable unnecessary services
+Write-Host "ปิดใช้งาน services ที่ไม่จำเป็น..." -ForegroundColor Cyan
+`$servicesToDisable = @("TlntSvr", "MSFTPSVC", "RemoteRegistry", "Messenger")
+foreach (`$service in `$servicesToDisable) {
+    try {
+        Stop-Service `$service -Force -ErrorAction SilentlyContinue
+        Set-Service `$service -StartupType Disabled -ErrorAction SilentlyContinue
+        Write-Host "ปิดใช้งาน `$service สำเร็จ" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "ไม่สามารถปิดใช้งาน `$service ได้" -ForegroundColor Yellow
+    }
+}
+
+# Registry Security Settings
+Write-Host "กำหนดค่า Registry Security..." -ForegroundColor Cyan
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\LSA" -Name "RestrictAnonymous" -Value 1 -Force
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\LSA" -Name "RestrictAnonymousSAM" -Value 1 -Force
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Value 1 -Force
+
+# Disable SMB1
+Write-Host "ปิดใช้งาน SMB1 Protocol..." -ForegroundColor Cyan
+Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart
+
+# PowerShell Execution Policy
+Write-Host "กำหนดค่า PowerShell Execution Policy..." -ForegroundColor Cyan
+Set-ExecutionPolicy RemoteSigned -Force
+
+Write-Host "การ hardening เบื้องต้นเสร็จสิ้น" -ForegroundColor Green
+Write-Host "แนะนำให้ restart ระบบและรันการตรวจสอบอีกครั้ง" -ForegroundColor Yellow
+"@
+
+    $hardeningPath = Join-Path $OutputPath "CIS_Windows_Hardening.ps1"
+    $hardeningScript | Out-File -FilePath $hardeningPath -Encoding UTF8
+    Write-Host "สร้าง hardening script ไว้ที่: $hardeningPath" -ForegroundColor Green
+}
+
+# Show help
+function Show-Help {
+    Write-Host "CIS Windows 10/11 Security Audit Script" -ForegroundColor $Colors.HEADER
+    Write-Host "การใช้งาน: .\CIS_Windows_Audit.ps1 [parameters]" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Parameters:" -ForegroundColor Cyan
+    Write-Host "  -Help                   แสดงคำอธิบายการใช้งาน"
+    Write-Host "  -CreateHardening        สร้าง hardening script"
+    Write-Host "  -ExportResults          Export ผลลัพธ์เป็น CSV"
+    Write-Host "  -OutputPath <path>      กำหนด path สำหรับ output files (default: C:\Temp)"
+    Write-Host ""
+    Write-Host "ตัวอย่าง:" -ForegroundColor Yellow
+    Write-Host "  .\CIS_Windows_Audit.ps1"
+    Write-Host "  .\CIS_Windows_Audit.ps1 -ExportResults"
+    Write-Host "  .\CIS_Windows_Audit.ps1 -CreateHardening -OutputPath C:\Security"
+    Write-Host ""
+    Write-Host "หมายเหตุ: ต้องรันในสิทธิ์ Administrator" -ForegroundColor Red
+}
+
+# Main execution
+if ($Help) {
+    Show-Help
+    exit
+}
+
+if ($CreateHardening) {
+    Initialize-Script
+    New-HardeningScript
+    exit
+}
+
+# Run security audit
+Initialize-Script
+Get-SystemInfo
+Test-AccountPolicies
+Test-LocalPolicies
+Test-WindowsFirewall
+Test-WindowsDefender
+Test-WindowsUpdates
+Test-NetworkSecurity
+Test-SystemServices
+Test-RegistrySecurity
+Test-AuditPolicy
+Test-AdditionalSecurity
+Show-Summary
+Export-Results
+
+Write-Host "`nการตรวจสอบเสร็จสิ้น!" -ForegroundColor $Colors.PASS

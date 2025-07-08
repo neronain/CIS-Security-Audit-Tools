@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CIS Security Audit Report</title>
+    <style>
+        :root {
+            --primary-color: #2563eb;
+            --success-color: #059669;
+            --warning-color: #d97706;
+            --danger-color: #dc2626;
+            --critical-color: #7c2d12;
+            --info-color: #0891b2;
+            --bg-light: #f8fafc;
+            --bg-white: #ffffff;
+            --text-dark: #1f2937;
+            --text-gray: #6b7280;
+            --border-color: #e5e7eb;
+            --shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+            --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-light);
+            color: var(--text-dark);
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        /* Header */
+        .header {
+            background: linear-gradient(135deg, var(--primary-color) 0%, #1d4ed8 100%);
+            color: white;
+            padding: 2rem;
+            border-radius: 12px;
+            margin-bottom: 2rem;
+            box-shadow: var(--shadow-lg);
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+
+        /* System Info */
+        .system-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .info-card {
+            background: var(--bg-white);
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: var(--shadow);
+            border-left: 4px solid var(--primary-color);
+        }
+
+        .info-card h3 {
+            color: var(--text-gray);
+            font-size: 0.875rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.5rem;
+        }
+
+        .info-card p {
+            font-size: 1.125rem;
+            font-weight: 600;
+            color: var(--text-dark);
+        }
+
+        /* Dashboard Cards */
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .metric-card {
+            background: var(--bg-white);
+            padding: 1.5rem;
+            border-radius: 12px;
+            box-shadow: var(--shadow);
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .metric-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: var(--primary-color);
+        }
+
+        .metric-card.pass::before { background: var(--success-color); }
+        .metric-card.fail::before { background: var(--danger-color); }
+        .metric-card.warn::before { background: var(--warning-color); }
+        .metric-card.critical::before { background: var(--critical-color); }
+
+        .metric-number {
+            font-size: 3rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+
+        .metric-card.pass .metric-number { color: var(--success-color); }
+        .metric-card.fail .metric-number { color: var(--danger-color); }
+        .metric-card.warn .metric-number { color: var(--warning-color); }
+        .metric-card.critical .metric-number { color: var(--critical-color); }
+
+        .metric-label {
+            font-size: 1rem;
+            color: var(--text-gray);
+            font-weight: 500;
+        }
+
+        /* Security Score */
+        .security-score {
+            background: var(--bg-white);
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: var(--shadow);
+            margin-bottom: 2rem;
+            text-align: center;
+        }
+
+        .score-circle {
+            width: 200px;
+            height: 200px;
+            margin: 0 auto 1rem;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .score-text {
+            font-size: 3rem;
+            font-weight: 700;
+            color: var(--text-dark);
+        }
+
+        .score-label {
+            font-size: 1.25rem;
+            color: var(--text-gray);
+            margin-bottom: 1rem;
+        }
+
+        .score-level {
+            display: inline-block;
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .level-excellent { background: #d1fae5; color: var(--success-color); }
+        .level-good { background: #dbeafe; color: var(--primary-color); }
+        .level-medium { background: #fef3c7; color: var(--warning-color); }
+        .level-poor { background: #fecaca; color: var(--danger-color); }
+
+        /* Filters */
+        .filters {
+            background: var(--bg-white);
+            padding: 1.5rem;
+            border-radius: 12px;
+            box-shadow: var(--shadow);
+            margin-bottom: 2rem;
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .filter-group {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .filter-group label {
+            font-weight: 500;
+            color: var(--text-dark);
+        }
+
+        select, input {
+            padding: 0.5rem;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            font-size: 0.875rem;
+        }
+
+        .btn {
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 6px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: var(--primary-color);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #1d4ed8;
+        }
+
+        /* Results Table */
+        .results-section {
+            background: var(--bg-white);
+            border-radius: 12px;
+            box-shadow: var(--shadow);
+            overflow: hidden;
+            margin-bottom: 2rem;
+        }
+
+        .section-header {
+            background: #f9fafb;
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .section-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--text-dark);
+        }
+
+        .table-container {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th {
+            background: #f9fafb;
+            padding: 1rem;
+            text-align: left;
+            font-weight: 600;
+            color: var(--text-dark);
+            border-bottom: 1px solid var(--border-color);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        td {
+            padding: 1rem;
+            border-bottom: 1px solid #f3f4f6;
+        }
+
+        tr:hover {
+            background: #f9fafb;
+        }
+
+        /* Status Badges */
+        .status-badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .status-pass {
+            background: #d1fae5;
+            color: var(--success-color);
+        }
+
+        .status-fail {
+            background: #fecaca;
+            color: var(--danger-color);
+        }
+
+        .status-warn {
+            background: #fef3c7;
+            color: var(--warning-color);
+        }
+
+        .status-info {
+            background: #dbeafe;
+            color: var(--info-color);
+        }
+
+        /* Risk Level Badges */
+        .risk-critical {
+            background: #fef2f2;
+            color: var(--critical-color);
+        }
+
+        .risk-high {
+            background: #fecaca;
+            color: var(--danger-color);
+        }
+
+        .risk-medium {
+            background: #fef3c7;
+            color: var(--warning-color);
+        }
+
+        .risk-low {
+            background: #d1fae5;
+            color: var(--success-color);
+        }
+
+        /* Recommendations */
+        .recommendations {
+            background: var(--bg-white);
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: var(--shadow);
+            margin-bottom: 2rem;
+        }
+
+        .recommendations h2 {
+            color: var(--text-dark);
+            margin-bottom: 1rem;
+        }
+
+        .recommendation-item {
+            background: #fef9e7;
+            border-left: 4px solid var(--warning-color);
+            padding: 1rem;
+            margin-bottom: 1rem;
+            border-radius: 0 6px 6px 0;
+        }
+
+        .recommendation-item:last-child {
+            margin-bottom: 0;
+        }
+
+        .recommendation-title {
+            font-weight: 600;
+            color: var(--text-dark);
+            margin-bottom: 0.5rem;
+        }
+
+        .recommendation-desc {
+            color: var(--text-gray);
+            font-size: 0.9rem;
+        }
+
+        /* Critical Issues Alert */
+        .critical-alert {
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .critical-alert h3 {
+            color: var(--danger-color);
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .critical-alert ul {
+            margin-left: 1rem;
+            color: var(--text-dark);
+        }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-gray);
+            border-top: 1px solid var(--border-color);
+            margin-top: 2rem;
+        }
+
+        /* Print Styles */
+        @media print {
+            .filters, .btn { display: none; }
+            .container { max-width: none; padding: 0; }
+            .header { background: var(--primary-color) !important; -webkit-print-color-adjust: exact; }
+            .metric-card, .results-section { break-inside: avoid; }
+        }
+
+        /* Mobile Responsive */
+        @media (max-width: 768px) {
+            .header h1 { font-size: 2rem; }
+            .dashboard { grid-template-columns: repeat(2, 1fr); }
+            .filters { flex-direction: column; align-items: stretch; }
+            .filter-group { justify-content: space-between; }
+            table { font-size: 0.875rem; }
+            th, td { padding: 0.75rem 0.5rem; }
+        }
+
+        /* Progress bar for score */
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: #e5e7eb;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 1rem 0;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--danger-color) 0%, var(--warning-color) 50%, var(--success-color) 100%);
+            border-radius: 10px;
+            transition: width 0.5s ease;
+        }
+
+        /* Animation for numbers */
+        @keyframes countUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .metric-number {
+            animation: countUp 0.6s ease forwards;
+        }
+
+        /* Expandable details */
+        .expandable {
+            cursor: pointer;
+        }
+
+        .expandable:hover {
+            background: #f9fafb;
+        }
+
+        .details {
+            display: none;
+            background: #f9fafb;
+            padding: 1rem;
+            font-size: 0.875rem;
+            color: var(--text-gray);
+        }
+
+        .details.show {
+            display: block;
+        }
+
+        /* Charts placeholder */
+        .chart-container {
+            background: var(--bg-white);
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: var(--shadow);
+            margin-bottom: 2rem;
+            text-align: center;
+        }
+
+        .chart-placeholder {
+            width: 100%;
+            height: 300px;
+            background: linear-gradient(45deg, #f3f4f6 25%, transparent 25%), 
+                        linear-gradient(-45deg, #f3f4f6 25%, transparent 25%), 
+                        linear-gradient(45deg, transparent 75%, #f3f4f6 75%), 
+                        linear-gradient(-45deg, transparent 75%, #f3f4f6 75%);
+            background-size: 20px 20px;
+            background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-gray);
+            font-size: 1.1rem;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>🔐 CIS Security Audit Report</h1>
+            <p>รายงานการตรวจสอบความปลอดภัยระบบตามมาตรฐาน CIS</p>
+        </div>
+
+        <!-- System Information -->
+        <div class="system-info">
+            <div class="info-card">
+                <h3>System</h3>
+                <p id="systemName">{{SYSTEM_NAME}}</p>
+            </div>
+            <div class="info-card">
+                <h3>OS Version</h3>
+                <p id="osVersion">{{OS_VERSION}}</p>
+            </div>
+            <div class="info-card">
+                <h3>Audit Date</h3>
+                <p id="auditDate">{{AUDIT_DATE}}</p>
+            </div>
+            <div class="info-card">
+                <h3>Domain</h3>
+                <p id="domain">{{DOMAIN}}</p>
+            </div>
+        </div>
+
+        <!-- Security Score -->
+        <div class="security-score">
+            <h2>Security Score</h2>
+            <div class="score-circle">
+                <div class="score-text" id="securityScore">{{SECURITY_SCORE}}</div>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" style="width: {{SECURITY_SCORE}}%"></div>
+            </div>
+            <div class="score-label">คะแนนความปลอดภัยโดยรวม</div>
+            <div class="score-level {{SECURITY_LEVEL_CLASS}}" id="securityLevel">{{SECURITY_LEVEL}}</div>
+        </div>
+
+        <!-- Dashboard Metrics -->
+        <div class="dashboard">
+            <div class="metric-card pass">
+                <div class="metric-number" id="passCount">{{PASS_COUNT}}</div>
+                <div class="metric-label">Passed</div>
+            </div>
+            <div class="metric-card fail">
+                <div class="metric-number" id="failCount">{{FAIL_COUNT}}</div>
+                <div class="metric-label">Failed</div>
+            </div>
+            <div class="metric-card warn">
+                <div class="metric-number" id="warnCount">{{WARN_COUNT}}</div>
+                <div class="metric-label">Warnings</div>
+            </div>
+            <div class="metric-card critical">
+                <div class="metric-number" id="criticalCount">{{CRITICAL_COUNT}}</div>
+                <div class="metric-label">Critical Issues</div>
+            </div>
+        </div>
+
+        <!-- Critical Issues Alert -->
+        <div class="critical-alert" id="criticalAlert" style="display: {{CRITICAL_DISPLAY}};">
+            <h3>⚠️ ปัญหาที่ต้องแก้ไขด่วน</h3>
+            <ul id="criticalIssues">
+                {{CRITICAL_ISSUES_LIST}}
+            </ul>
+        </div>
+
+        <!-- Chart Section -->
+        <div class="chart-container">
+            <h2>Security Overview</h2>
+            <div class="chart-placeholder">
+                📊 Security Status Distribution Chart
+            </div>
+        </div>
+
+        <!-- Filters -->
+        <div class="filters">
+            <div class="filter-group">
+                <label for="statusFilter">Status:</label>
+                <select id="statusFilter" onchange="filterResults()">
+                    <option value="">All</option>
+                    <option value="PASS">Pass</option>
+                    <option value="FAIL">Fail</option>
+                    <option value="WARN">Warning</option>
+                    <option value="INFO">Info</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label for="riskFilter">Risk Level:</label>
+                <select id="riskFilter" onchange="filterResults()">
+                    <option value="">All</option>
+                    <option value="Critical">Critical</option>
+                    <option value="High">High</option>
+                    <option value="Medium">Medium</option>
+                    <option value="Low">Low</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label for="searchFilter">Search:</label>
+                <input type="text" id="searchFilter" placeholder="Search descriptions..." onkeyup="filterResults()">
+            </div>
+            <button class="btn btn-primary" onclick="exportResults()">📄 Export</button>
+            <button class="btn btn-primary" onclick="window.print()">🖨️ Print</button>
+        </div>
+
+        <!-- Results Table -->
+        <div class="results-section">
+            <div class="section-header">
+                <h2 class="section-title">Security Check Results</h2>
+            </div>
+            <div class="table-container">
+                <table id="resultsTable">
+                    <thead>
+                        <tr>
+                            <th>Check ID</th>
+                            <th>Status</th>
+                            <th>Description</th>
+                            <th>Risk Level</th>
+                            <th>Details</th>
+                            <th>Recommendation</th>
+                        </tr>
+                    </thead>
+                    <tbody id="resultsBody">
+                        {{RESULTS_TABLE_ROWS}}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Recommendations -->
+        <div class="recommendations">
+            <h2>💡 คำแนะนำการปรับปรุง</h2>
+            <div id="recommendationsList">
+                {{RECOMMENDATIONS_LIST}}
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <p>Generated by CIS Security Audit Script | {{GENERATION_TIME}}</p>
+            <p>สำหรับข้อมูลเพิ่มเติม โปรดอ้างอิง CIS Benchmarks และ security best practices</p>
+        </div>
+    </div>
+
+    <script>
+        // Sample data for demonstration - will be replaced by actual data
+        const auditResults = [
+            {{AUDIT_RESULTS_JSON}}
+        ];
+
+        // Filter function
+        function filterResults() {
+            const statusFilter = document.getElementById('statusFilter').value;
+            const riskFilter = document.getElementById('riskFilter').value;
+            const searchFilter = document.getElementById('searchFilter').value.toLowerCase();
+            const tbody = document.getElementById('resultsBody');
+            const rows = tbody.getElementsByTagName('tr');
+
+            for (let row of rows) {
+                let show = true;
+                const cells = row.getElementsByTagName('td');
+                
+                if (cells.length > 0) {
+                    const status = cells[1].textContent.trim();
+                    const description = cells[2].textContent.toLowerCase();
+                    const risk = cells[3].textContent.trim();
+
+                    if (statusFilter && !status.includes(statusFilter)) show = false;
+                    if (riskFilter && !risk.includes(riskFilter)) show = false;
+                    if (searchFilter && !description.includes(searchFilter)) show = false;
+                }
+
+                row.style.display = show ? '' : 'none';
+            }
+
+            updateVisibleCount();
+        }
+
+        // Update visible count
+        function updateVisibleCount() {
+            const tbody = document.getElementById('resultsBody');
+            const rows = tbody.getElementsByTagName('tr');
+            let visibleCount = 0;
+
+            for (let row of rows) {
+                if (row.style.display !== 'none') visibleCount++;
+            }
+
+            console.log(`Showing ${visibleCount} of ${rows.length} results`);
+        }
+
+        // Export function
+        function exportResults() {
+            const table = document.getElementById('resultsTable');
+            const rows = Array.from(table.getElementsByTagName('tr'));
+            const visibleRows = rows.filter(row => row.style.display !== 'none');
+            
+            let csv = '';
+            visibleRows.forEach(row => {
+                const cells = Array.from(row.getElementsByTagName('td')).concat(Array.from(row.getElementsByTagName('th')));
+                const rowData = cells.map(cell => `"${cell.textContent.replace(/"/g, '""')}"`).join(',');
+                csv += rowData + '\n';
+            });
+
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `security_audit_results_${new Date().toISOString().split('T')[0]}.csv`;
+            a.click();
+            window.URL.revokeObjectURL(url);
+        }
+
+        // Toggle details
+        function toggleDetails(element) {
+            const details = element.nextElementSibling;
+            if (details && details.classList.contains('details')) {
+                details.classList.toggle('show');
+            }
+        }
+
+        // Add click handlers for expandable rows
+        document.addEventListener('DOMContentLoaded', function() {
+            const expandableRows = document.querySelectorAll('.expandable');
+            expandableRows.forEach(row => {
+                row.addEventListener('click', () => toggleDetails(row));
+            });
+
+            // Animate numbers on load
+            animateNumbers();
+        });
+
+        // Animate numbers
+        function animateNumbers() {
+            const numbers = document.querySelectorAll('.metric-number');
+            numbers.forEach(num => {
+                const target = parseInt(num.textContent);
+                let current = 0;
+                const increment = target / 20;
+                const timer = setInterval(() => {
+                    current += increment;
+                    if (current >= target) {
+                        current = target;
+                        clearInterval(timer);
+                    }
+                    num.textContent = Math.floor(current);
+                }, 50);
+            });
+        }
+
+        // Initialize filters
+        filterResults();
+    </script>
+</body>
+</html>
